@@ -1,0 +1,488 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Zelda-like MVP — HTML5 Canvas + Gamepad</title>
+<style>
+  :root{--bg:#0b0d12;--fg:#e9edf5;--muted:#a5adbb;--acc:#7cc9ff;--ok:#6ee7a3;--bad:#ff7a7a}
+  html,body{height:100%;background:var(--bg);color:var(--fg);margin:0;font:14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Inter, Arial}
+  #wrap{position:fixed;inset:0;display:grid;place-items:center}
+  #game{display:block;background:#10141d;box-shadow:0 12px 40px rgba(0,0,0,.45)}
+  #overlay{position:fixed;inset:0;background:linear-gradient(180deg,rgba(0,0,0,.66),rgba(0,0,0,.88));display:flex;align-items:center;justify-content:center}
+  #panel{max-width:740px;padding:28px;border:1px solid rgba(255,255,255,.1);background:#0f1320;border-radius:16px;box-shadow:0 18px 60px rgba(0,0,0,.6)}
+  h1{margin:0 0 8px;font-weight:800;letter-spacing:.2px}
+  .muted{color:var(--muted)}
+  button{cursor:pointer;margin-top:16px;padding:12px 16px;border-radius:12px;border:1px solid rgba(255,255,255,.12);background:#12192a;color:var(--fg);font-weight:700}
+  button:hover{background:#16203a}
+  code{background:#0e1320;border:1px solid rgba(255,255,255,.06);padding:.15em .35em;border-radius:.35em}
+  #toast{position:fixed;left:50%;transform:translateX(-50%);bottom:18px;background:#0f1422;border:1px solid rgba(255,255,255,.12);padding:8px 12px;border-radius:10px;opacity:0;transition:opacity .2s}
+</style>
+</head>
+<body>
+  <div id="wrap"><canvas id="game" width="960" height="540"></canvas></div>
+  <div id="overlay">
+    <div id="panel">
+      <h1>Zelda‑like MVP</h1>
+      <p class="muted">Top‑down rectangles only. Keyboard + Gamepad. Includes: movement, sword attack & hit, enemies, hearts, rupees, chest, sign, pushable block, doors, basic collisions, camera.</p>
+      <ul class="muted">
+        <li><b>Move:</b> <code>WASD</code> / <code>Arrows</code> / Left‑stick / D‑pad</li>
+        <li><b>Attack:</b> <code>J</code> / <code>Space</code> / Gamepad <code>A (0)</code></li>
+        <li><b>Interact:</b> <code>K</code> / <code>E</code> / Gamepad <code>X/Y (2/3)</code></li>
+        <li><b>Pause:</b> <code>Esc</code> / Gamepad <code>Start (9)</code></li>
+        <li><b>Fullscreen:</b> <code>F</code> or the button below</li>
+      </ul>
+      <button id="startBtn">Start (enter fullscreen)</button>
+      <p class="muted" style="margin-top:10px">Tip: connect a controller before pressing Start. Tested with Xbox/PS controllers via the Gamepad API.</p>
+    </div>
+  </div>
+  <div id="toast"></div>
+
+<script>
+(() => {
+  // ===== Helpers =====
+  const TAU = Math.PI*2;
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const lerp = (a,b,t)=>a+(b-a)*t;
+  const now = () => performance.now();
+  const rectsOverlap = (a,b)=> a.x<b.x+b.w && b.x<a.x+a.w && a.y<b.y+b.h && b.y<a.y+a.h;
+  const tileSize = 16; // world tile size in pixels (world units)
+
+  // ===== Canvas & View =====
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  let view = { w: 320, h: 180, scale: 3, shake: 0, x:0, y:0 };
+
+  function resize() {
+    // maintain integer scale of the virtual view to fit window
+    const maxScale = Math.floor(Math.min(window.innerWidth / view.w, window.innerHeight / view.h));
+    view.scale = Math.max(1, maxScale);
+    canvas.width = view.w * view.scale;
+    canvas.height = view.h * view.scale;
+    ctx.imageSmoothingEnabled = false;
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // ===== Fullscreen =====
+  async function goFullscreen() {
+    const elem = document.documentElement;
+    if (!document.fullscreenElement) {
+      try { await elem.requestFullscreen(); } catch(e) {}
+    }
+  }
+  document.addEventListener('keydown', (e)=>{ if (e.key.toLowerCase()==='f') goFullscreen(); });
+  document.getElementById('startBtn').addEventListener('click', async ()=>{
+    await goFullscreen();
+    document.getElementById('overlay').style.display='none';
+    showToast('Press Esc to pause.');
+    startGame();
+  });
+
+  function showToast(msg, ms=1400){
+    const t = document.getElementById('toast');
+    t.textContent = msg; t.style.opacity=1; clearTimeout(showToast._t);
+    showToast._t = setTimeout(()=>t.style.opacity=0, ms);
+  }
+
+  // ===== Input (Keyboard + Gamepad) =====
+  const input = {
+    up:false, down:false, left:false, right:false,
+    attack:false, interact:false, pause:false,
+    just:{attack:false, interact:false, pause:false}
+  };
+  const keys = new Set();
+  const pressEdge = new Set();
+  const KEYMAP = {
+    'arrowup':'up','w':'up', 'arrowdown':'down','s':'down', 'arrowleft':'left','a':'left','arrowright':'right','d':'right',
+    'j':'attack',' ':'attack', 'k':'interact','e':'interact', 'enter':'interact', 'escape':'pause'
+  };
+  addEventListener('keydown', e=>{
+    const k = KEYMAP[e.key.toLowerCase()]; if(!k) return;
+    e.preventDefault();
+    keys.add(k); pressEdge.add(k);
+  });
+  addEventListener('keyup', e=>{ const k = KEYMAP[e.key.toLowerCase()]; if(!k) return; keys.delete(k); });
+
+  let prevButtons = [];
+  function pollGamepad() {
+    const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    let gp = null;
+    for (const p of pads) if (p && p.connected) { gp = p; break; }
+    // Reset; keyboard overrides gamepad if both are used
+    input.up = keys.has('up'); input.down = keys.has('down'); input.left = keys.has('left'); input.right = keys.has('right');
+    input.attack = keys.has('attack'); input.interact = keys.has('interact'); input.pause = keys.has('pause');
+    input.just.attack = pressEdge.has('attack'); input.just.interact = pressEdge.has('interact'); input.just.pause = pressEdge.has('pause');
+
+    if (!gp) { prevButtons = []; pressEdge.clear(); return; }
+
+    const b = i => (gp.buttons[i] && gp.buttons[i].pressed) ? 1 : 0;
+    const dead = v => Math.abs(v) > 0.25 ? v : 0;
+    const axX = dead(gp.axes[0]||0), axY = dead(gp.axes[1]||0);
+
+    const gLeft = axX < -0.25 || b(14);
+    const gRight = axX > 0.25 || b(15);
+    const gUp = axY < -0.25 || b(12);
+    const gDown = axY > 0.25 || b(13);
+
+    input.left = input.left || gLeft; input.right = input.right || gRight;
+    input.up = input.up || gUp; input.down = input.down || gDown;
+
+    const gAttack = b(0); // A
+    const gInteract = b(2) || b(3) || b(1); // X/Y/B
+    const gPause = b(9) || b(8);
+
+    input.attack = input.attack || !!gAttack;
+    input.interact = input.interact || !!gInteract;
+    input.pause = input.pause || !!gPause;
+
+    // edges
+    function justPressed(idx){ const prev = prevButtons[idx]||0; const cur = b(idx); prevButtons[idx]=cur; return !prev && cur; }
+    input.just.attack = input.just.attack || justPressed(0);
+    input.just.interact = input.just.interact || justPressed(2) || justPressed(3) || justPressed(1);
+    input.just.pause = input.just.pause || justPressed(9) || justPressed(8);
+
+    pressEdge.clear(); // consume keyboard edges once per frame
+  }
+
+  // ===== World & Entities =====
+  const world = {
+    tiles: [], w: 0, h: 0, 
+    solids: new Set(['#','@','B','D']), // impassable: wall, pillar, pushBlock, door (locked)
+    chests: [], signs: [], pushBlocks: [], enemies: [], rupees: [], doors: []
+  };
+
+  function loadMap(strings) {
+    world.tiles = strings.map(s=>s.split(''));
+    world.h = world.tiles.length; world.w = world.tiles[0].length;
+    world.chests.length = world.signs.length = world.pushBlocks.length = world.enemies.length = world.rupees.length = world.doors.length = 0;
+    for (let y=0; y<world.h; y++) for (let x=0; x<world.w; x++) {
+      const t = world.tiles[y][x];
+      if (t==='C') world.chests.push({x,y,open:false});
+      if (t==='S') world.signs.push({x,y,text:"It's dangerous to go alone! (Press Attack)", seen:false});
+      if (t==='B') world.pushBlocks.push({x,y});
+      if (t==='E') world.enemies.push(makeEnemy(x*tileSize+4,y*tileSize+4));
+      if (t==='r') world.rupees.push(makeRupee(x*tileSize+6,y*tileSize+6));
+      if (t==='D') world.doors.push({x,y,open:false});
+    }
+  }
+
+  function tileAt(px,py){ const x=Math.floor(px/tileSize), y=Math.floor(py/tileSize); if (x<0||y<0||x>=world.w||y>=world.h) return '#'; return world.tiles[y][x]; }
+  function isSolidTile(px,py){ const t=tileAt(px,py); return world.solids.has(t); }
+
+  function rectBlocked(x,y,w,h){
+    // sample corners
+    return isSolidTile(x,y) || isSolidTile(x+w-1,y) || isSolidTile(x,y+h-1) || isSolidTile(x+w-1,y+h-1);
+  }
+
+  // ===== Entities =====
+  const entities = [];
+  const spawners = { rupee: makeRupee };
+
+  function makeRupee(x,y){ return {type:'rupee', x,y,w:6,h:8, v:1, bob:0, remove:false}; }
+  function makeEnemy(x,y){ return {type:'enemy', x,y,w:10,h:10, vx:0, vy:0, speed:18, hp:2, hurtT:0, aiT:0, remove:false}; }
+  function swordHitbox(px,py,dir){
+    const s = {type:'sword', x:px, y:py, w:12, h:12, t:0.12, dir, remove:false};
+    if (dir==='right') { s.x+=10; s.y+=2; s.w=14; s.h=10; }
+    if (dir==='left') { s.x-=14; s.y+=2; s.w=14; s.h=10; }
+    if (dir==='up') { s.y-=14; s.x+=2; s.w=10; s.h=14; }
+    if (dir==='down') { s.y+=10; s.x+=2; s.w=10; s.h=14; }
+    return s;
+  }
+
+  // ===== Player =====
+  const player = { x: tileSize*4, y: tileSize*5, w:10, h:12, speed:44, dir:'down', hp:6, maxHp:6, iframes:0, rupees:0, attackCd:0, reading:null, paused:false, key:false };
+
+  // ===== Sample Map =====
+  const map = [
+    '############################',
+    '#..............@...........#',
+    '#..S...........@.......E...#',
+    '#..............@...........#',
+    '#....#######...............#',
+    '#....#.....#....r....C.....#',
+    '#....#..B..#...............#',
+    '#....#.D...#...............#',
+    '#....#######...............#',
+    '#..............E...........#',
+    '#..r.............r.........#',
+    '#..............@...........#',
+    '#..............@...........#',
+    '############################'
+  ];
+  loadMap(map);
+
+  // Pre-populate entities with rupees & enemies from world lists (so we can animate them)
+  for (const r of world.rupees) entities.push(r);
+  for (const e of world.enemies) entities.push(e);
+
+  // ===== Gameplay systems =====
+  let last = now(), acc = 0, dt = 1/60;
+  let running = false;
+
+  function startGame(){ running = true; last = now(); requestAnimationFrame(loop); }
+
+  function loop(){
+    if (!running) return;
+    const t = now(); const frame = Math.min(0.05, (t - last)/1000); last = t;
+    pollGamepad();
+    update(frame);
+    render();
+    requestAnimationFrame(loop);
+  }
+
+  addEventListener('visibilitychange', ()=>{ if (document.hidden) player.paused = true; });
+
+  function update(frame){
+    // Pause toggle
+    if (input.just.pause) player.paused = !player.paused;
+    if (player.paused) return;
+
+    // Reading/sign dialog locks controls
+    if (player.reading){ if (input.just.interact || input.just.attack) { player.reading = null; } return; }
+
+    // Movement
+    let mvx = (input.right?1:0) - (input.left?1:0);
+    let mvy = (input.down?1:0) - (input.up?1:0);
+    if (Math.abs(mvx)+Math.abs(mvy) > 0){ const l = Math.hypot(mvx,mvy); mvx/=l; mvy/=l; }
+    const speed = player.speed;
+
+    // Facing
+    if (Math.abs(mvx) > Math.abs(mvy)) player.dir = (mvx>0?'right':'left');
+    else if (Math.abs(mvy)>0) player.dir = (mvy>0?'down':'up');
+
+    // Attempt move with collision against solid tiles & push blocks
+    const next = { x: player.x + mvx*speed*frame, y: player.y + mvy*speed*frame, w: player.w, h: player.h };
+
+    // Push block interaction (hold direction to push one tile)
+    handlePushBlocks(mvx, mvy, frame);
+
+    if (!rectBlocked(next.x, player.y, player.w, player.h) && !intersectsAnyPushBlock(next.x, player.y, player.w, player.h)) player.x = next.x;
+    if (!rectBlocked(player.x, next.y, player.w, player.h) && !intersectsAnyPushBlock(player.x, next.y, player.w, player.h)) player.y = next.y;
+
+    // Attack
+    if (player.attackCd>0) player.attackCd -= frame;
+    if (input.just.attack && player.attackCd<=0){
+      entities.push(swordHitbox(player.x, player.y, player.dir));
+      player.attackCd = 0.22; // cooldown
+    }
+
+    // Interact: signs, chests, doors
+    if (input.just.interact){
+      if (trySign()){} else if (tryChest()){} else if (tryDoor()){}
+    }
+
+    // Update sword hitboxes & enemy interactions
+    for (const e of entities) {
+      if (e.type==='sword'){
+        e.t -= frame; if (e.t<=0) e.remove=true;
+        for (const en of entities) if (en.type==='enemy' && !en.remove){
+          if (rectsOverlap(e,{x:e.x,y:e.y,w:e.w,h:e.h}) && rectsOverlap(e,en)){
+            en.hp -= 1; en.hurtT = 0.2; view.shake = 3; if (en.hp<=0) { en.remove=true; // drop rupee
+              entities.push(makeRupee(en.x+2,en.y+2));
+            }
+          }
+        }
+      } else if (e.type==='enemy'){
+        // simple wander/seek AI
+        e.aiT -= frame; if (e.aiT<=0){ e.aiT = 0.8 + Math.random()*1.2; const ang = Math.atan2(player.y-e.y, player.x-e.x); const bias = 0.6; const rand = (Math.random()-0.5)*TAU*(1-bias); e.vx = Math.cos(ang*bias+rand)*e.speed; e.vy = Math.sin(ang*bias+rand)*e.speed; }
+        const nx = e.x + e.vx*frame*0.6, ny = e.y + e.vy*frame*0.6;
+        if (!rectBlocked(nx,e.y,e.w,e.h)) e.x = nx; if (!rectBlocked(e.x,ny,e.w,e.h)) e.y = ny;
+        if (e.hurtT>0) e.hurtT -= frame;
+        // Contact damage
+        if (rectsOverlap(e, player) && player.iframes<=0){ player.hp -= 1; player.iframes = 1.0; view.shake = 4; }
+      } else if (e.type==='rupee'){
+        e.bob += frame*4;
+        if (rectsOverlap(e, player)) { player.rupees += e.v; e.remove=true; showToast('Rupees: '+player.rupees); }
+      }
+    }
+
+    // Cleanup
+    for (let i=entities.length-1;i>=0;i--) if (entities[i].remove) entities.splice(i,1);
+
+    // I-frames
+    if (player.iframes>0) player.iframes -= frame;
+
+    // Camera
+    view.x = clamp(player.x - view.w/2, 0, world.w*tileSize - view.w);
+    view.y = clamp(player.y - view.h/2, 0, world.h*tileSize - view.h);
+    if (view.shake>0){ view.shake = Math.max(0, view.shake - 12*frame); }
+  }
+
+  function intersectsAnyPushBlock(x,y,w,h){
+    for (const b of world.pushBlocks){ const r={x:b.x*tileSize,y:b.y*tileSize,w:tileSize,h:tileSize}; if (x<r.x+r.w && r.x<x+w && y<r.y+r.h && r.y<y+h) return true; }
+    return false;
+  }
+
+  let pushTimer = 0;
+  function handlePushBlocks(ix,iy,frame){
+    if (Math.abs(ix)+Math.abs(iy)===0){ pushTimer=0; return; }
+    // Check adjacent block in the direction of movement
+    const px = Math.floor((player.x + player.w/2)/tileSize), py = Math.floor((player.y + player.h/2)/tileSize);
+    const dir = Math.abs(ix)>Math.abs(iy) ? (ix>0?'right':'left') : (iy>0?'down':'up');
+    let tx = px + (dir==='right'?1:dir==='left'?-1:0);
+    let ty = py + (dir==='down'?1:dir==='up'?-1:0);
+    const block = world.pushBlocks.find(b=>b.x===tx && b.y===ty);
+    if (!block){ pushTimer=0; return; }
+    pushTimer += frame; if (pushTimer < 0.25) return; // need to hold for a moment
+    // Target tile one further ahead must be empty and not solid
+    const nx = tx + (dir==='right'?1:dir==='left'?-1:0);
+    const ny = ty + (dir==='down'?1:dir==='up'?-1:0);
+    if (nx<0||ny<0||nx>=world.w||ny>=world.h) return;
+    const t = world.tiles[ny][nx];
+    const occupied = world.pushBlocks.some(b=>b!==block && b.x===nx && b.y===ny);
+    const solid = world.solids.has(t) && t!=='D'; // allow pushing into door tile to press it
+    if (occupied || solid) return;
+    // Move block
+    world.tiles[block.y][block.x] = '.';
+    block.x = nx; block.y = ny;
+    world.tiles[ny][nx] = 'B';
+    pushTimer = 0; view.shake = 2;
+  }
+
+  function trySign(){
+    for (const s of world.signs){
+      const r = {x:s.x*tileSize, y:s.y*tileSize, w:tileSize, h:tileSize};
+      const near = Math.hypot((player.x+player.w/2)-(r.x+r.w/2),(player.y+player.h/2)-(r.y+r.h/2)) < 18;
+      if (near){ player.reading = s.text; s.seen = true; return true; }
+    }
+    return false;
+  }
+  function tryChest(){
+    for (const c of world.chests){
+      const r = {x:c.x*tileSize, y:c.y*tileSize, w:tileSize, h:tileSize};
+      const near = Math.hypot((player.x+player.w/2)-(r.x+r.w/2),(player.y+player.h/2)-(r.y+r.h/2)) < 16;
+      if (near && !c.open){ c.open=true; // reward
+        for (let i=0;i<3;i++) entities.push(makeRupee(r.x+4+i*3, r.y+4));
+        showToast('Chest opened!'); return true; }
+    }
+    return false;
+  }
+  function tryDoor(){
+    for (const d of world.doors){
+      const r = {x:d.x*tileSize, y:d.y*tileSize, w:tileSize, h:tileSize};
+      const near = Math.hypot((player.x+player.w/2)-(r.x+r.w/2),(player.y+player.h/2)-(r.y+r.h/2)) < 16;
+      if (near && !d.open){ d.open=true; world.tiles[d.y][d.x]='.'; showToast('Door opened.'); return true; }
+    }
+    return false;
+  }
+
+  // ===== Render =====
+  function render(){
+    // logical render to virtual view then scale up by ctx transform
+    ctx.save();
+    ctx.imageSmoothingEnabled = false;
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+
+    // Scale
+    ctx.scale(view.scale, view.scale);
+    const shakeX = (Math.random()-0.5)*view.shake;
+    const shakeY = (Math.random()-0.5)*view.shake;
+    ctx.translate(-(view.x|0)+shakeX, -(view.y|0)+shakeY);
+
+    // World tiles
+    for (let y=0;y<world.h;y++){
+      for (let x=0;x<world.w;x++){
+        const t = world.tiles[y][x];
+        const px = x*tileSize, py = y*tileSize;
+        // floor
+        ctx.fillStyle = '#0e1420'; ctx.fillRect(px,py,tileSize,tileSize);
+        // decorations / solids
+        if (t==='#'){ ctx.fillStyle='#203047'; ctx.fillRect(px,py,tileSize,tileSize); }
+        if (t==='@'){ ctx.fillStyle='#19273c'; ctx.fillRect(px,py,tileSize,tileSize); ctx.fillStyle='#263b58'; ctx.fillRect(px+3,py+3,tileSize-6,tileSize-6); }
+        if (t==='C'){ ctx.fillStyle='#5b3b1e'; ctx.fillRect(px+2,py+6,tileSize-4,8); ctx.fillStyle='#704822'; ctx.fillRect(px+2,py+4,tileSize-4,4); }
+        if (t==='S'){ ctx.fillStyle='#2d4e2d'; ctx.fillRect(px+2,py+2,tileSize-4,tileSize-4); }
+        if (t==='B'){ ctx.fillStyle='#3a3a52'; ctx.fillRect(px+1,py+1,tileSize-2,tileSize-2); }
+        if (t==='D'){ ctx.fillStyle='#6a2a2a'; ctx.fillRect(px+1,py+1,tileSize-2,tileSize-2); }
+      }
+    }
+
+    // Entities
+    for (const e of entities){
+      if (e.type==='enemy'){
+        ctx.fillStyle = e.hurtT>0 ? '#ffaaaa' : '#8ad0ff';
+        ctx.fillRect(e.x, e.y, e.w, e.h);
+      } else if (e.type==='rupee'){
+        const bob = Math.sin(e.bob)*1.5;
+        ctx.fillStyle = '#67e08d';
+        ctx.fillRect(e.x, e.y + bob, e.w, e.h);
+      } else if (e.type==='sword'){
+        ctx.fillStyle = '#f0e28a';
+        ctx.fillRect(e.x, e.y, e.w, e.h);
+      }
+    }
+
+    // Player
+    if (!player.paused){
+      ctx.fillStyle = player.iframes>0 ? '#ffd3d3' : '#f1f3f7';
+      ctx.fillRect(player.x, player.y, player.w, player.h);
+      // facing indicator
+      ctx.fillStyle = '#7cc9ff';
+      const fx = player.dir==='right'?player.x+player.w: player.dir==='left'?player.x-2: player.x+player.w/2-1;
+      const fy = player.dir==='down'?player.y+player.h: player.dir==='up'?player.y-2: player.y+player.h/2-1;
+      ctx.fillRect(fx, fy, player.dir==='left'||player.dir==='right'?2:2, player.dir==='up'||player.dir==='down'?2:2);
+    }
+
+    // HUD (no camera transform)
+    ctx.restore();
+
+    // Hearts
+    const hearts = Math.ceil(player.maxHp/2);
+    for (let i=0;i<hearts;i++){
+      const full = player.hp/2 > i;
+      const half = player.hp/2 > i && player.hp%2===1 && Math.floor(player.hp/2)===i;
+      const x = 10 + i*12, y = 10;
+      ctx.fillStyle = '#222'; ctx.fillRect(x, y, 10, 8);
+      ctx.fillStyle = full? '#ff5f6d' : half? '#ffb3b9' : '#444';
+      ctx.fillRect(x+1, y+1, 8, 6);
+    }
+
+    // Rupees count
+    ctx.fillStyle = '#67e08d'; ctx.fillRect(10, 24, 8, 10); ctx.fillStyle='#e9edf5'; ctx.fillText('x '+player.rupees, 22, 33);
+
+    // Interact hints (ray near)
+    const hint = nearestHint();
+    if (hint){ ctx.fillStyle='rgba(0,0,0,.6)'; ctx.fillRect(canvas.width/2-80, 6, 160, 16); ctx.fillStyle='#e9edf5'; ctx.fillText(hint, canvas.width/2-74, 18); }
+
+    // Dialog / Pause
+    if (player.reading){
+      drawPanel('Sign', player.reading + '\n(Press Interact to close)');
+    }
+    if (player.paused){ drawPanel('Paused', 'Press Pause/Start to resume.'); }
+  }
+
+  function nearestHint(){
+    // look for nearby interactive
+    const near = (tx,ty,r=18)=> Math.hypot((player.x+player.w/2)-(tx*tileSize+8),(player.y+player.h/2)-(ty*tileSize+8))<r;
+    for (const s of world.signs) if (near(s.x,s.y)) return 'Read (E / X)';
+    for (const c of world.chests) if (!c.open && near(c.x,c.y)) return 'Open (E / X)';
+    for (const d of world.doors) if (near(d.x,d.y)) return 'Open (E / X)';
+    // push block hint if adjacent
+    const px = Math.floor((player.x + player.w/2)/tileSize), py = Math.floor((player.y + player.h/2)/tileSize);
+    for (const b of world.pushBlocks){ if (Math.abs(b.x-px)+Math.abs(b.y-py)===1) return 'Push (hold toward)'; }
+    return '';
+  }
+
+  function drawPanel(title, text){
+    const w = Math.min(280, canvas.width-40), h=100;
+    const x = (canvas.width - w)/2, y = canvas.height - h - 20;
+    const ctx2 = ctx; ctx2.fillStyle='rgba(0,0,0,.7)'; ctx2.fillRect(x,y,w,h);
+    ctx2.strokeStyle='rgba(255,255,255,.15)'; ctx2.strokeRect(x+0.5,y+0.5,w-1,h-1);
+    ctx2.fillStyle='#e9edf5'; ctx2.fillText(title, x+10, y+18);
+    wrapText(ctx2, text, x+10, y+34, w-20, 14);
+  }
+  function wrapText(context, text, x, y, maxWidth, lineHeight){
+    const words = (''+text).split(/\s+/); let line='';
+    for (let n=0;n<words.length;n++){
+      const test = line + words[n] + ' ';
+      const w = context.measureText(test).width;
+      if (w > maxWidth && n>0){ context.fillText(line, x, y); line = words[n] + ' '; y += lineHeight; }
+      else line = test;
+    }
+    context.fillText(line, x, y);
+  }
+
+})();
+</script>
+</body>
+</html>

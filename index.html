@@ -34,6 +34,15 @@
         <li><b>Fullscreen:</b> <code>F</code></li>
         <li><b>Pad debug overlay:</b> <code>;</code></li>
       </ul>
+      <div class="muted" style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <label>Gamepad slot:
+          <select id="padSelect">
+            <option value="-1">Auto (first active)</option>
+          </select>
+        </label>
+        <button id="rescanBtn" type="button">Rescan</button>
+        <label style="display:flex;align-items:center;gap:6px;"><input id="rememberPad" type="checkbox"/> Remember</label>
+      </div>
       <button id="startBtn">Start (enter fullscreen)</button>
       <p class="muted" style="margin-top:10px">Tip: connect a controller before pressing Start. Tested with Xbox/PS controllers via the Gamepad API.</p>
     </div>
@@ -85,6 +94,42 @@
     showToast._t = setTimeout(()=>t.style.opacity=0, ms);
   }
 
+  // ===== Gamepad Slot Menu & Persistence =====
+  const PAD_STORE_KEY = 'zelda_mvp_pad_index';
+  let preferredPadIndex = null; // null => auto
+  let usedPadIndex = -1;
+  function loadPadPref(){
+    const v = localStorage.getItem(PAD_STORE_KEY);
+    if (v!==null){ const n = parseInt(v,10); preferredPadIndex = (Number.isNaN(n) || n<0) ? null : n; }
+  }
+  function chooseGamepad(pads, pref){
+    if (Number.isInteger(pref) && pref>=0 && pref<pads.length){ const p=pads[pref]; if (p && p.connected) return {gp:p, idx: pref}; }
+    for (let i=0;i<pads.length;i++){ const p=pads[i]; if (p && p.connected) return {gp:p, idx:i}; }
+    return {gp:null, idx:-1};
+  }
+  function populatePadSelect(){
+    const sel = document.getElementById('padSelect'); if (!sel) return;
+    sel.innerHTML = '<option value="-1">Auto (first active)</option>';
+    const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    for (let i=0;i<pads.length;i++){ const p=pads[i]; if(!p) continue; const o=document.createElement('option'); o.value=String(i); o.textContent=`[${i}] ${p.id||'Gamepad'}`; sel.appendChild(o); }
+    sel.value = preferredPadIndex==null? '-1' : String(preferredPadIndex);
+  }
+  function initPadMenu(){
+    loadPadPref();
+    populatePadSelect();
+    const rem = document.getElementById('rememberPad'); if (rem) rem.checked = localStorage.getItem(PAD_STORE_KEY)!==null;
+  }
+  initPadMenu();
+  document.getElementById('rescanBtn').addEventListener('click', populatePadSelect);
+  document.getElementById('padSelect').addEventListener('change', (e)=>{
+    const v = parseInt(e.target.value,10); preferredPadIndex = (v>=0)?v:null;
+    const rem = document.getElementById('rememberPad'); if (rem && rem.checked) localStorage.setItem(PAD_STORE_KEY, String(v));
+  });
+  document.getElementById('rememberPad').addEventListener('change', (e)=>{
+    if (e.target.checked){ const v = document.getElementById('padSelect').value; localStorage.setItem(PAD_STORE_KEY, v); }
+    else localStorage.removeItem(PAD_STORE_KEY);
+  });
+
   // ===== Input (Keyboard + Gamepad) =====
   const input = {
     up:false, down:false, left:false, right:false,
@@ -107,12 +152,12 @@
 
   let prevButtons = [];
   let gpConnected = false;
-  window.addEventListener('gamepadconnected', e=>{ gpConnected = true; showToast('Gamepad connected: '+(e.gamepad && (e.gamepad.id||'pad'))); });
-  window.addEventListener('gamepaddisconnected', ()=>{ gpConnected = false; showToast('Gamepad disconnected'); });
+  window.addEventListener('gamepadconnected', e=>{ gpConnected = true; showToast('Gamepad connected: '+(e.gamepad && (e.gamepad.id||'pad'))); populatePadSelect(); });
+  window.addEventListener('gamepaddisconnected', ()=>{ gpConnected = false; showToast('Gamepad disconnected'); populatePadSelect(); });
   function pollGamepad() {
     const pads = navigator.getGamepads ? navigator.getGamepads() : [];
-    let gp = null;
-    for (const p of pads) if (p && p.connected) { gp = p; break; }
+    const pick = chooseGamepad(pads, preferredPadIndex==null ? -1 : preferredPadIndex);
+    let gp = pick.gp; usedPadIndex = pick.idx;
     // Reset; keyboard overrides gamepad if both are used
     input.up = keys.has('up'); input.down = keys.has('down'); input.left = keys.has('left'); input.right = keys.has('right');
     input.attack = keys.has('attack'); input.interact = keys.has('interact'); input.pause = keys.has('pause'); input.cycle = keys.has('cycle');
@@ -542,7 +587,7 @@
     // Rupees + item + pad icon
     ctx.fillStyle = '#67e08d'; ctx.fillRect(10, 24, 8, 10); ctx.fillStyle='#e9edf5'; ctx.fillText('x '+player.rupees, 22, 33);
     ctx.fillText(curItem().toUpperCase(), canvas.width-80, 33);
-    if (gpConnected) ctx.fillText('🎮', canvas.width - 18, 14);
+    if (gpConnected) ctx.fillText('🎮#'+(usedPadIndex>=0?usedPadIndex:'?'), canvas.width - 52, 14);
     if (PADDBG){
       const gp=(navigator.getGamepads&&navigator.getGamepads()[0])||null;
       if(gp){ ctx.fillText('axes:'+gp.axes.slice(0,2).map(v=>v.toFixed(2)).join(','),10,canvas.height-24); const pressed=gp.buttons.map(b=>b.pressed?1:0).join(''); ctx.fillText('btns:'+pressed,10,canvas.height-10);} 
@@ -599,6 +644,10 @@
       // entity makers
       const tBoom = makeBomb(0,0); console.assert(tBoom.type==='bomb', 'Bomb factory');
       console.assert(typeof render === 'function' && typeof update === 'function', 'Core loops present');
+      // chooseGamepad tests
+      let r = chooseGamepad([{connected:false},{connected:true},{connected:true}], 2); console.assert(r.idx===2, 'prefers specified index');
+      r = chooseGamepad([{connected:false},{connected:true}], 0); console.assert(r.idx===1, 'skips disconnected #0');
+      r = chooseGamepad([{connected:true}], 5); console.assert(r.idx===0, 'oob fallback to 0');
       console.log('[Smoke] OK');
       showToast('Smoke OK');
     }catch(err){ console.error('Self-test failed', err); }

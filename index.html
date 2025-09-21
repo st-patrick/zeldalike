@@ -57,6 +57,7 @@
   const now = () => performance.now();
   const rectsOverlap = (a,b)=> a.x<b.x+b.w && b.x<a.x+a.w && a.y<b.y+b.h && b.y<a.y+a.h;
   const showToast=(msg,ms=1400)=>{ const t=document.getElementById('toast'); t.textContent=msg; t.style.opacity=1; clearTimeout(showToast._t); showToast._t=setTimeout(()=>t.style.opacity=0,ms); };
+  const DIRS=[[1,0],[-1,0],[0,1],[0,-1]];
 
   // Canvas
   const canvas = document.getElementById('game');
@@ -149,32 +150,27 @@
   const player={x:tileSize*4,y:tileSize*5,w:10,h:12,speed:44,dir:'down',hp:6,maxHp:6,iframes:0,rupees:0,attackCd:0,reading:null,paused:false,carry:null, keys:0, kbx:0,kby:0,kbT:0};
   const items=['sword','boomerang','bomb','bow']; let itemIdx=0; const curItem=()=>items[itemIdx];
 
-  // ===== Map with light narrative =====
-  const map=[
-    '############################',
-    '#..K..G..P.....@....X......#',
-    '#..S..G.......@.......E....#',
-    '#.............@............#',
-    '#....#######...............#',
-    '#....#..^..#....r....C.....#',
-    '#....#..B..#...............#',
-    '#....#.....#...............#',
-    '#....##L####...............#',
-    '#..............E...........#',
-    '#..r.....G.......r.........#',
-    '#..............@...........#',
-    '#..............@...........#',
-    '#....G..P..X..B..^..D..C...#',
-    '#G.P.r..E....G..P...r.....#',
-    '#..B..^..D..####..@..C.....#',
-    '#..G..G..G...........S.....#',
-    '#..P..P..P....X..X..X......#',
-    '#..E..E..E....r..r..r......#',
-    '#..####..@..B....^....D....#',
-    '#..C..S..G..P....X....@....#',
-    '############################'
-  ];
-  loadMap(map);
+  // ===== Room-by-room demo map (generated to stay concise & consistent) =====
+  function genDemoMap(){
+    const W=60,H=22; const rows=Array.from({length:H},()=>Array(W).fill('#'));
+    const fill=(x1,y1,x2,y2,ch='.')=>{ for(let y=y1;y<=y2;y++) for(let x=x1;x<=x2;x++) rows[y][x]=ch; };
+    const place=(x,y,ch)=>{ rows[y][x]=ch; };
+    // R1: Start, sign, simple door
+    fill(2,3,10,9,'.'); place(4,5,'S'); place(6,7,'G'); place(8,7,'P'); place(11,6,'D');
+    // R2: One enemy + key -> locked door
+    fill(12,3,22,9,'.'); place(14,6,'E'); place(20,5,'K'); place(23,6,'L');
+    // R3: Push block onto switch to open doors
+    fill(24,3,34,9,'.'); place(27,6,'B'); place(30,6,'^'); place(35,6,'D');
+    // R4: Bomb cracked wall to proceed
+    fill(36,3,48,9,'.'); place(41,5,'S'); // hint sign
+    for(let x=42;x<=46;x++) place(x,6,'X'); // cracked barrier
+    place(49,6,'D');
+    // R5: Reward room
+    fill(50,3,58,9,'.'); place(54,6,'C'); place(52,6,'r'); place(56,6,'r');
+    // corridors already opened by doors once activated (adjacent tiles are floor)
+    return rows.map(r=>r.join(''));
+  }
+  loadMap(genDemoMap());
   for(const r of world.rupees) entities.push(r);
   for(const e of world.enemies) entities.push(e);
 
@@ -259,8 +255,7 @@
     // Tiles
     for(let y=0;y<world.h;y++) for(let x=0;x<world.w;x++){
       const t=world.tiles[y][x], px=x*tileSize, py=y*tileSize; ctx.fillStyle='#0e1420'; ctx.fillRect(px,py,tileSize,tileSize);
-      if(t==='#'){ ctx.fillStyle='#203047'; ctx.fillRect(px,py,tileSize,tileSize); }
-      if(t==='@'){ ctx.fillStyle='#19273c'; ctx.fillRect(px,py,tileSize,tileSize); ctx.fillStyle='#263b58'; ctx.fillRect(px+3,py+3,tileSize-6,tileSize-6); }
+      if(t==='#'||t==='@'){ ctx.fillStyle=t==='#'?'#203047':'#19273c'; ctx.fillRect(px,py,tileSize,tileSize); if(t==='@'){ ctx.fillStyle='#263b58'; ctx.fillRect(px+3,py+3,tileSize-6,tileSize-6); } }
       if(t==='C'){ ctx.fillStyle='#5b3b1e'; ctx.fillRect(px+2,py+6,tileSize-4,8); ctx.fillStyle='#704822'; ctx.fillRect(px+2,py+4,tileSize-4,4); }
       if(t==='G'){ ctx.fillStyle='#2f7032'; ctx.fillRect(px+2,py+2,tileSize-4,tileSize-4); }
       if(t==='P'){ ctx.fillStyle='#6f6a5f'; ctx.fillRect(px+2,py+2,tileSize-4,tileSize-4); }
@@ -271,7 +266,7 @@
       if(t==='D'||t==='L'){ ctx.fillStyle= t==='L' ? '#8a2a2a' : '#6a2a2a'; ctx.fillRect(px+1,py+1,tileSize-2,tileSize-2); }
       if(t==='K'){ ctx.fillStyle='#c7a84a'; ctx.fillRect(px+4,py+6,8,6); }
       if('CSDLBP G^XK'.includes(t)){ const near=Math.hypot((player.x+player.w/2)-(px+8),(player.y+player.h/2)-(py+8))<28; ctx.strokeStyle='rgba(124,201,255,'+(0.45+0.45*Math.sin(gTime*6))*(near?1:0.6)+')'; ctx.lineWidth=near?1.5:1; ctx.strokeRect(px+0.5,py+0.5,tileSize-1,tileSize-1); }
-      const name={'C':'Chest','S':'Sign','D':'Door','L':'Locked','B':'Block','P':'Pot','G':'Grass','^':'Switch','X':'Cracked','@':'Pillar','#':'Wall','K':'Key'}[t]; if(name) label4(name,px,py+10);
+      const name={'C':'Chest','S':'Sign','D':'Door','L':'Locked','B':'Block','P':'Pot','G':'Grass','^':'Switch','X':'Cracked','K':'Key'}[t]; if(name) label4(name,px,py+10);
     }
 
     // Entities
@@ -292,16 +287,13 @@
 
     // HUD
     ctx.restore();
-    // Hearts
     const hearts=Math.ceil(player.maxHp/2); for(let i=0;i<hearts;i++){ const full=player.hp/2>i; const half=player.hp/2>i && player.hp%2===1 && Math.floor(player.hp/2)===i; const x=10+i*12,y=10; ctx.fillStyle='#222'; ctx.fillRect(x,y,10,8); ctx.fillStyle=full?'#ff5f6d':half?'#ffb3b9':'#444'; ctx.fillRect(x+1,y+1,8,6); }
-    // Rupees + item + keys + pad
     ctx.fillStyle='#67e08d'; ctx.fillRect(10,24,8,10); ctx.fillStyle='#e9edf5'; ctx.fillText('x '+player.rupees,22,33);
     ctx.fillStyle='#c7a84a'; ctx.fillRect(80,24,8,10); ctx.fillStyle='#e9edf5'; ctx.fillText('x '+player.keys,92,33);
     ctx.fillText(curItem().toUpperCase(), canvas.width-80, 33);
     if(gpConnected) ctx.fillText('🎮#'+(usedPadIndex>=0?usedPadIndex:'?'), canvas.width-52, 14);
     if(PADDBG){ const gp=(navigator.getGamepads&&navigator.getGamepads()[0])||null; if(gp){ ctx.fillText('axes:'+gp.axes.slice(0,2).map(v=>v.toFixed(2)).join(','),10,canvas.height-24); const pressed=gp.buttons.map(b=>b.pressed?1:0).join(''); ctx.fillText('btns:'+pressed,10,canvas.height-10); } }
 
-    // Hint + panels
     const hint=nearestHint(); if(hint){ ctx.fillStyle='rgba(0,0,0,.6)'; ctx.fillRect(canvas.width/2-90,6,180,16); ctx.fillStyle='#e9edf5'; ctx.fillText(hint, canvas.width/2-84, 18); }
     if(player.reading) drawPanel('Sign', player.reading+'\n(Press Interact to close)');
     if(player.paused) drawPanel('Paused','Press Pause/Start to resume.');
@@ -314,7 +306,7 @@
   function trySign(){ for(const s of world.signs){ const r={x:s.x*tileSize,y:s.y*tileSize,w:tileSize,h:tileSize}; const near=Math.hypot((player.x+player.w/2)-(r.x+r.w/2),(player.y+player.h/2)-(r.y+r.h/2))<22; if(near){ player.reading=s.text; s.seen=true; return true; } } return false; }
   function tryChest(){ for(const c of world.chests){ const r={x:c.x*tileSize,y:c.y*tileSize,w:tileSize,h:tileSize}; const near=Math.hypot((player.x+player.w/2)-(r.x+r.w/2),(player.y+player.h/2)-(r.y+r.h/2))<22; if(near&&!c.open){ c.open=true; for(let i=0;i<3;i++) entities.push(makeRupee(r.x+4+i*3,r.y+4)); showToast('Chest opened!'); return true; } } return false; }
   function tryDoor(){ for(const d of world.doors){ const r={x:d.x*tileSize,y:d.y*tileSize,w:tileSize,h:tileSize}; const near=Math.hypot((player.x+player.w/2)-(r.x+r.w/2),(player.y+player.h/2)-(r.y+r.h/2))<22; if(near&&!d.open){ if(d.locked){ if(player.keys>0){ player.keys--; d.open=true; world.tiles[d.y][d.x]='.'; showToast('Unlocked door.'); return true; } else { showToast('It\'s locked'); return true; } } else { d.open=true; world.tiles[d.y][d.x]='.'; showToast('Door opened.'); return true; } } } return false; }
-  function tryPot(){ if(player.carry) return false; const px=((player.x+player.w/2)/tileSize)|0, py=((player.y+player.h/2)/tileSize)|0; for(const [dx,dy] of [[1,0],[-1,0],[0,1],[0,-1]]){ const tx=px+dx,ty=py+dy; if(world.tiles[ty]&&world.tiles[ty][tx]==='P'){ world.tiles[ty][tx]='.'; player.carry='pot'; showToast('Picked up pot'); return true; } } return false; }
+  function tryPot(){ if(player.carry) return false; const px=((player.x+player.w/2)/tileSize)|0, py=((player.y+player.h/2)/tileSize)|0; for(const [dx,dy] of DIRS){ const tx=px+dx,ty=py+dy; if(world.tiles[ty]&&world.tiles[ty][tx]==='P'){ world.tiles[ty][tx]='.'; player.carry='pot'; showToast('Picked up pot'); return true; } } return false; }
 
   // ===== Smoke tests =====
   function runSelfTests(){ try{
@@ -324,7 +316,7 @@
       console.assert(typeof render==='function'&&typeof update==='function','Loops present');
       let r=chooseGamepad([{connected:false},{connected:true},{connected:true}],2); console.assert(r.idx===2,'prefer specified'); r=chooseGamepad([{connected:false},{connected:true}],0); console.assert(r.idx===1,'skip disconnected 0'); r=chooseGamepad([{connected:true}],5); console.assert(r.idx===0,'oob → 0');
       r=chooseGamepad([{connected:false,id:'ghost',buttons:[],axes:[]} , {connected:false,id:'real',buttons:[{pressed:false}],axes:[0]}], -1); console.assert(r.idx===1,'fallback to first non-null/active');
-      console.assert(typeof handlePushBlocks==='function','handlePushBlocks missing'); console.assert(typeof intersectsAnyPushBlock==='function','intersectsAnyPushBlock missing');
+      console.assert(world.solids.has('#')&&world.solids.has('@'),'Solids include wall/pillar');
       if(world.pushBlocks[0]){ const b=world.pushBlocks[0]; const hit=intersectsAnyPushBlock(b.x*tileSize,b.y*tileSize,tileSize,tileSize); console.assert(!!hit,'push-block hit self'); }
       const px0=player.x,py0=player.y; let threw=false; try{ render(); }catch(e){ threw=true; } console.assert(!threw,'render() throws'); console.assert(player.x===px0&&player.y===py0,'render purity'); const x0=player.x,y0=player.y; update(0); console.assert(player.x===x0&&player.y===y0,'update(0) stationary');
       console.log('[Smoke] OK'); showToast('Smoke OK');

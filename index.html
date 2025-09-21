@@ -234,6 +234,40 @@
     return isSolidTile(x,y) || isSolidTile(x+w-1,y) || isSolidTile(x,y+h-1) || isSolidTile(x+w-1,y+h-1);
   }
 
+  // === Push-block helpers ===
+  let pushTimer = 0;
+  function intersectsAnyPushBlock(x,y,w,h){
+    for (const b of world.pushBlocks){ const r={x:b.x*tileSize,y:b.y*tileSize,w:tileSize,h:tileSize}; if (x<r.x+r.w && r.x<x+w && y<r.y+r.h && r.y<y+h) return true; }
+    return false;
+  }
+  function handlePushBlocks(ix,iy,frame){
+    // Hold direction toward an adjacent block to shove it one tile if target is free.
+    if (Math.abs(ix)+Math.abs(iy)===0){ pushTimer=0; return; }
+    const px = Math.floor((player.x + player.w/2)/tileSize), py = Math.floor((player.y + player.h/2)/tileSize);
+    const dir = Math.abs(ix)>Math.abs(iy) ? (ix>0?'right':'left') : (iy>0?'down':'up');
+    const dx = dir==='right'?1:dir==='left'?-1:0, dy = dir==='down'?1:dir==='up'?-1:0;
+    const tx = px + dx, ty = py + dy; // block next to player
+    const block = world.pushBlocks.find(b=>b.x===tx && b.y===ty);
+    if (!block){ pushTimer=0; return; }
+    pushTimer += frame; if (pushTimer < 0.25) return; // require brief hold
+    const nx = tx + dx, ny = ty + dy; // destination tile for block
+    if (nx<0||ny<0||nx>=world.w||ny>=world.h) return;
+    const tNext = world.tiles[ny][nx];
+    const occupied = world.pushBlocks.some(b=>b!==block && b.x===nx && b.y===ny);
+    const solid = world.solids.has(tNext) && tNext!=='D' && tNext!=='^'; // allow pushing onto door/switch tiles
+    if (occupied || solid) return;
+    // move block
+    world.tiles[block.y][block.x] = '.';
+    block.x = nx; block.y = ny;
+    world.tiles[ny][nx] = 'B';
+    pushTimer = 0; view.shake = 2;
+    // interactions
+    const door = world.doors.find(d=>d.x===nx && d.y===ny && !d.open);
+    if (door){ door.open = true; world.tiles[ny][nx] = '.'; showToast('Door opened!'); }
+    const sw = world.switches.find(s=>s.x===nx && s.y===ny);
+    if (sw){ for (const d of world.doors){ if (!d.open){ d.open=true; world.tiles[d.y][d.x]='.'; } } showToast('Switch pressed'); }
+  }
+
   // ===== Entities =====
   const entities = [];
   const spawners = { rupee: makeRupee };
@@ -274,6 +308,14 @@
     '#..r.....G.......r.........#',
     '#..............@...........#',
     '#..............@...........#',
+    '#....G..P..X..B..^..D..C...#',
+    '#G.P.r..E....G..P...r.....#',
+    '#..B..^..D..####..@..C.....#',
+    '#..G..G..G...........S.....#',
+    '#..P..P..P....X..X..X......#',
+    '#..E..E..E....r..r..r......#',
+    '#..####..@..B....^....D....#',
+    '#..C..S..G..P....X....@....#',
     '############################'
   ];
   loadMap(map);
@@ -350,7 +392,7 @@
       if (tryPot()){} else if (trySign()){} else if (tryChest()){} else if (tryDoor()){}
     }
 
-    // Entity updates & interactions
+    // Entity updates & interactions (no drawing here)
     for (const e of entities) {
       if (e.type==='sword'){
         e.t -= frame; if (e.t<=0) e.remove=true;
@@ -378,7 +420,7 @@
         e.bob += frame*3; if (rectsOverlap(e,player)) { player.hp = Math.min(player.maxHp, player.hp+1); e.remove=true; }
       } else if (e.type==='bomb'){
         e.t -= frame; if (e.t<=0){ e.remove=true; entities.push(makeExplosion(e.x, e.y));
-          // Break cracked walls near explosion
+          // Break cracked walls adjacent
           const cx=Math.floor(e.x/tileSize), cy=Math.floor(e.y/tileSize);
           for (let yy=cy-1; yy<=cy+1; yy++) for (let xx=cx-1; xx<=cx+1; xx++) if (world.tiles[yy] && world.tiles[yy][xx]==='X') world.tiles[yy][xx]='.';
         }
@@ -421,82 +463,13 @@
     if (view.shake>0){ view.shake = Math.max(0, view.shake - 12*frame); }
   }
 
-  function intersectsAnyPushBlock(x,y,w,h){
-    for (const b of world.pushBlocks){ const r={x:b.x*tileSize,y:b.y*tileSize,w:tileSize,h:tileSize}; if (x<r.x+r.w && r.x<x+w && y<r.y+r.h && r.y<y+h) return true; }
-    return false;
-  }
-
-  let pushTimer = 0;
-  function handlePushBlocks(ix,iy,frame){
-    if (Math.abs(ix)+Math.abs(iy)===0){ pushTimer=0; return; }
-    // Check adjacent block in the direction of movement
-    const px = Math.floor((player.x + player.w/2)/tileSize), py = Math.floor((player.y + player.h/2)/tileSize);
-    const dir = Math.abs(ix)>Math.abs(iy) ? (ix>0?'right':'left') : (iy>0?'down':'up');
-    let tx = px + (dir==='right'?1:dir==='left'?-1:0);
-    let ty = py + (dir==='down'?1:dir==='up'?-1:0);
-    const block = world.pushBlocks.find(b=>b.x===tx && b.y===ty);
-    if (!block){ pushTimer=0; return; }
-    pushTimer += frame; if (pushTimer < 0.25) return; // need to hold for a moment
-    // Target tile one further ahead must be empty and not solid
-    const nx = tx + (dir==='right'?1:dir==='left'?-1:0);
-    const ny = ty + (dir==='down'?1:dir==='up'?-1:0);
-    if (nx<0||ny<0||nx>=world.w||ny>=world.h) return;
-    const t = world.tiles[ny][nx];
-    const occupied = world.pushBlocks.some(b=>b!==block && b.x===nx && b.y===ny);
-    const solid = world.solids.has(t) && t!=='D'; // allow pushing into door tile to press it
-    if (occupied || solid) return;
-    // Move block
-    world.tiles[block.y][block.x] = '.';
-    block.x = nx; block.y = ny;
-    world.tiles[ny][nx] = 'B';
-    pushTimer = 0; view.shake = 2;
-    // If block pushed onto a door tile, open it
-    const door = world.doors.find(d=>d.x===nx && d.y===ny && !d.open);
-    if (door){ door.open = true; world.tiles[ny][nx] = '.'; showToast('Door opened!'); }
-  }
-
-  function trySign(){
-    for (const s of world.signs){
-      const r = {x:s.x*tileSize, y:s.y*tileSize, w:tileSize, h:tileSize};
-      const near = Math.hypot((player.x+player.w/2)-(r.x+r.w/2),(player.y+player.h/2)-(r.y+r.h/2)) < 22;
-      if (near){ player.reading = s.text; s.seen = true; return true; }
-    }
-    return false;
-  }
-  function tryChest(){
-    for (const c of world.chests){
-      const r = {x:c.x*tileSize, y:c.y*tileSize, w:tileSize, h:tileSize};
-      const near = Math.hypot((player.x+player.w/2)-(r.x+r.w/2),(player.y+player.h/2)-(r.y+r.h/2)) < 22;
-      if (near && !c.open){ c.open=true; // reward
-        for (let i=0;i<3;i++) entities.push(makeRupee(r.x+4+i*3, r.y+4));
-        showToast('Chest opened!'); return true; }
-    }
-    return false;
-  }
-  function tryDoor(){
-    for (const d of world.doors){
-      const r = {x:d.x*tileSize, y:d.y*tileSize, w:tileSize, h:tileSize};
-      const near = Math.hypot((player.x+player.w/2)-(r.x+r.w/2),(player.y+player.h/2)-(r.y+r.h/2)) < 22;
-      if (near && !d.open){ d.open=true; world.tiles[d.y][d.x]='.'; showToast('Door opened.'); return true; }
-    }
-    return false;
-  }
-  function tryPot(){
-    if (player.carry) return false;
-    const px=Math.floor((player.x+player.w/2)/tileSize), py=Math.floor((player.y+player.h/2)/tileSize);
-    // check adjacent tiles for 'P'
-    const dirs=[[1,0],[-1,0],[0,1],[0,-1]];
-    for (const [dx,dy] of dirs){ const tx=px+dx, ty=py+dy; if (world.tiles[ty] && world.tiles[ty][tx]==='P'){ world.tiles[ty][tx]='.'; player.carry='pot'; showToast('Picked up pot'); return true; } }
-    return false;
-  }
-
-  // ===== Render (draw only; no logic here) =====
+  // ===== Render (draw-only) =====
   function render(){
     ctx.save();
     ctx.imageSmoothingEnabled = false;
     ctx.clearRect(0,0,canvas.width,canvas.height);
 
-    // Scale + camera
+    // Scale + camera + shake
     ctx.scale(view.scale, view.scale);
     const shakeX = (Math.random()-0.5)*view.shake;
     const shakeY = (Math.random()-0.5)*view.shake;
@@ -520,40 +493,50 @@
         if (t==='X'){ ctx.fillStyle='#533b3b'; ctx.fillRect(px+1,py+1,tileSize-2,tileSize-2); }
         if (t==='^'){ ctx.fillStyle='#355b7a'; ctx.fillRect(px+3,py+6,tileSize-6,4); }
         if (t==='D'){ ctx.fillStyle='#6a2a2a'; ctx.fillRect(px+1,py+1,tileSize-2,tileSize-2); }
-        // Interactive highlight (C,S,D,B,P,G,^,X)
+        // Interactive highlight
         if (t==='C'||t==='S'||t==='D'||t==='B'||t==='P'||t==='G'||t==='^'||t==='X'){
           const cx = px + tileSize/2, cy = py + tileSize/2;
-          const dx = (player.x+player.w/2) - cx, dy = (player.y+player.h/2) - cy;
-          const d = Math.hypot(dx,dy);
+          const dx = (player.x+player.w/2) - cx, dy = (player.y+player.h/2) - cy; const d = Math.hypot(dx,dy);
           const pulse = 0.45 + 0.45*Math.sin(gTime*6);
           ctx.strokeStyle = 'rgba(124,201,255,' + (pulse * (d<28?1:0.6)).toFixed(2) + ')';
-          ctx.lineWidth = d<28 ? 1.5 : 1;
-          ctx.strokeRect(px+0.5, py+0.5, tileSize-1, tileSize-1);
+          ctx.lineWidth = d<28 ? 1.5 : 1; ctx.strokeRect(px+0.5, py+0.5, tileSize-1, tileSize-1);
         }
+        // Labels for tiles
+        const _nm = ({'C':'Chest','S':'Sign','D':'Door','B':'Block','P':'Pot','G':'Grass','^':'Switch','X':'Cracked','@':'Pillar','#':'Wall'})[t];
+        if (_nm){ ctx.save(); ctx.font='4px monospace'; ctx.fillStyle='black'; ctx.fillText(_nm, px+1, py+11); ctx.fillStyle='#a5adbb'; ctx.fillText(_nm, px, py+10); ctx.restore(); }
       }
     }
 
-    // Entities (draw only)
+    // Entities (draw-only)
     for (const e of entities){
       if (e.type==='enemy'){
         ctx.fillStyle = e.stunT>0 ? '#b6c5ff' : (e.hurtT>0 ? '#ffaaaa' : '#8ad0ff');
         ctx.fillRect(e.x, e.y, e.w, e.h);
+        ctx.save(); ctx.font='4px monospace'; ctx.fillStyle='black'; ctx.fillText('ENEMY', e.x+1, e.y-1); ctx.fillStyle='#a5adbb'; ctx.fillText('ENEMY', e.x, e.y-2); ctx.restore();
       } else if (e.type==='rupee'){
         const bob = Math.sin(e.bob)*1.5; ctx.fillStyle = '#67e08d'; ctx.fillRect(e.x, e.y + bob, e.w, e.h);
+        ctx.save(); ctx.font='4px monospace'; ctx.fillStyle='black'; ctx.fillText('RUPEE', e.x+1, e.y-1); ctx.fillStyle='#a5adbb'; ctx.fillText('RUPEE', e.x, e.y-2); ctx.restore();
       } else if (e.type==='heart'){
         const bob = Math.sin(e.bob)*1.2; ctx.fillStyle='#ff6b7a'; ctx.fillRect(e.x, e.y + bob, e.w, e.h);
+        ctx.save(); ctx.font='4px monospace'; ctx.fillStyle='black'; ctx.fillText('HEART', e.x+1, e.y-1); ctx.fillStyle='#a5adbb'; ctx.fillText('HEART', e.x, e.y-2); ctx.restore();
       } else if (e.type==='sword'){
         ctx.fillStyle = '#f0e28a'; ctx.fillRect(e.x, e.y, e.w, e.h);
+        ctx.save(); ctx.font='4px monospace'; ctx.fillStyle='black'; ctx.fillText('SWORD', e.x+1, e.y-1); ctx.fillStyle='#a5adbb'; ctx.fillText('SWORD', e.x, e.y-2); ctx.restore();
       } else if (e.type==='bomb'){
         ctx.fillStyle='#444'; ctx.fillRect(e.x,e.y,e.w,e.h);
+        ctx.save(); ctx.font='4px monospace'; ctx.fillStyle='black'; ctx.fillText('BOMB', e.x+1, e.y-1); ctx.fillStyle='#a5adbb'; ctx.fillText('BOMB', e.x, e.y-2); ctx.restore();
       } else if (e.type==='explosion'){
         ctx.fillStyle='rgba(255,210,120,0.8)'; ctx.fillRect(e.x,e.y,e.w,e.h);
+        ctx.save(); ctx.font='4px monospace'; ctx.fillStyle='black'; ctx.fillText('EXP', e.x+1, e.y-1); ctx.fillStyle='#a5adbb'; ctx.fillText('EXP', e.x, e.y-2); ctx.restore();
       } else if (e.type==='boomerang'){
         ctx.fillStyle='#bde0ff'; ctx.fillRect(e.x,e.y,e.w,e.h);
+        ctx.save(); ctx.font='4px monospace'; ctx.fillStyle='black'; ctx.fillText('BOOM', e.x+1, e.y-1); ctx.fillStyle='#a5adbb'; ctx.fillText('BOOM', e.x, e.y-2); ctx.restore();
       } else if (e.type==='arrow'){
         ctx.fillStyle='#e9edf5'; ctx.fillRect(e.x,e.y,e.w,e.h);
+        ctx.save(); ctx.font='4px monospace'; ctx.fillStyle='black'; ctx.fillText('ARROW', e.x+1, e.y-1); ctx.fillStyle='#a5adbb'; ctx.fillText('ARROW', e.x, e.y-2); ctx.restore();
       } else if (e.type==='potProj'){
         ctx.fillStyle='#6f6a5f'; ctx.fillRect(e.x,e.y,e.w,e.h);
+        ctx.save(); ctx.font='4px monospace'; ctx.fillStyle='black'; ctx.fillText('POT', e.x+1, e.y-1); ctx.fillStyle='#a5adbb'; ctx.fillText('POT', e.x, e.y-2); ctx.restore();
       }
     }
 
@@ -561,9 +544,7 @@
     if (!player.paused){
       ctx.fillStyle = player.iframes>0 ? '#ffd3d3' : '#f1f3f7';
       ctx.fillRect(player.x, player.y, player.w, player.h);
-      // carrying pot
       if (player.carry==='pot'){ ctx.fillStyle='#6f6a5f'; ctx.fillRect(player.x, player.y-6, 10, 6); }
-      // facing indicator
       ctx.fillStyle = '#7cc9ff';
       const fx = player.dir==='right'?player.x+player.w: player.dir==='left'?player.x-2: player.x+player.w/2-1;
       const fy = player.dir==='down'?player.y+player.h: player.dir==='up'?player.y-2: player.y+player.h/2-1;
@@ -593,7 +574,7 @@
       if(gp){ ctx.fillText('axes:'+gp.axes.slice(0,2).map(v=>v.toFixed(2)).join(','),10,canvas.height-24); const pressed=gp.buttons.map(b=>b.pressed?1:0).join(''); ctx.fillText('btns:'+pressed,10,canvas.height-10);} 
     }
 
-    // Interact hints (ray near)
+    // Interact hints
     const hint = nearestHint();
     if (hint){ ctx.fillStyle='rgba(0,0,0,.6)'; ctx.fillRect(canvas.width/2-80, 6, 160, 16); ctx.fillStyle='#e9edf5'; ctx.fillText(hint, canvas.width/2-74, 18); }
 
@@ -603,12 +584,10 @@
   }
 
   function nearestHint(){
-    // look for nearby interactive
     const near = (tx,ty,r=18)=> Math.hypot((player.x+player.w/2)-(tx*tileSize+8),(player.y+player.h/2)-(ty*tileSize+8))<r;
     for (const s of world.signs) if (near(s.x,s.y)) return 'Read (E / X)';
     for (const c of world.chests) if (!c.open && near(c.x,c.y)) return 'Open (E / X)';
     for (const d of world.doors) if (near(d.x,d.y)) return 'Open (E / X)';
-    // push block hint if adjacent
     const px = Math.floor((player.x + player.w/2)/tileSize), py = Math.floor((player.y + player.h/2)/tileSize);
     for (const b of world.pushBlocks){ if (Math.abs(b.x-px)+Math.abs(b.y-py)===1) return 'Push (hold toward)'; }
     return '';
@@ -633,21 +612,65 @@
     context.fillText(line, x, y);
   }
 
+  function trySign(){
+    for (const s of world.signs){
+      const r = {x:s.x*tileSize, y:s.y*tileSize, w:tileSize, h:tileSize};
+      const near = Math.hypot((player.x+player.w/2)-(r.x+r.w/2),(player.y+player.h/2)-(r.y+r.h/2)) < 22;
+      if (near){ player.reading = s.text; s.seen = true; return true; }
+    }
+    return false;
+  }
+  function tryChest(){
+    for (const c of world.chests){
+      const r = {x:c.x*tileSize, y:c.y*tileSize, w:tileSize, h:tileSize};
+      const near = Math.hypot((player.x+player.w/2)-(r.x+r.w/2),(player.y+player.h/2)-(r.y+r.h/2)) < 22;
+      if (near && !c.open){ c.open=true; for (let i=0;i<3;i++) entities.push(makeRupee(r.x+4+i*3, r.y+4)); showToast('Chest opened!'); return true; }
+    }
+    return false;
+  }
+  function tryDoor(){
+    for (const d of world.doors){
+      const r = {x:d.x*tileSize, y:d.y*tileSize, w:tileSize, h:tileSize};
+      const near = Math.hypot((player.x+player.w/2)-(r.x+r.w/2),(player.y+player.h/2)-(r.y+r.h/2)) < 22;
+      if (near && !d.open){ d.open=true; world.tiles[d.y][d.x]='.'; showToast('Door opened.'); return true; }
+    }
+    return false;
+  }
+  function tryPot(){
+    if (player.carry) return false;
+    const px=Math.floor((player.x+player.w/2)/tileSize), py=Math.floor((player.y+player.h/2)/tileSize);
+    const dirs=[[1,0],[-1,0],[0,1],[0,-1]];
+    for (const [dx,dy] of dirs){ const tx=px+dx, ty=py+dy; if (world.tiles[ty] && world.tiles[ty][tx]==='P'){ world.tiles[ty][tx]='.'; player.carry='pot'; showToast('Picked up pot'); return true; } }
+    return false;
+  }
+
   // ===== Tiny Smoke Tests =====
   function runSelfTests(){
     try{
       console.assert(typeof navigator.getGamepads === 'function', 'Gamepad API missing');
       console.assert(world.w>0 && world.h>0, 'Map not loaded');
       console.assert(Array.isArray(entities), 'Entities array missing');
-      // tile invariants
       const doorCount = world.doors.length; console.assert(doorCount>=1, 'Expected at least one door');
-      // entity makers
       const tBoom = makeBomb(0,0); console.assert(tBoom.type==='bomb', 'Bomb factory');
       console.assert(typeof render === 'function' && typeof update === 'function', 'Core loops present');
       // chooseGamepad tests
       let r = chooseGamepad([{connected:false},{connected:true},{connected:true}], 2); console.assert(r.idx===2, 'prefers specified index');
       r = chooseGamepad([{connected:false},{connected:true}], 0); console.assert(r.idx===1, 'skips disconnected #0');
       r = chooseGamepad([{connected:true}], 5); console.assert(r.idx===0, 'oob fallback to 0');
+      // push systems
+      console.assert(typeof handlePushBlocks==='function', 'handlePushBlocks missing');
+      console.assert(typeof intersectsAnyPushBlock==='function', 'intersectsAnyPushBlock missing');
+      if (world.pushBlocks[0]){
+        const b = world.pushBlocks[0];
+        const hit = intersectsAnyPushBlock(b.x*tileSize, b.y*tileSize, tileSize, tileSize);
+        console.assert(!!hit, 'Push-block intersection should detect its own tile');
+      }
+      // render smoke + non-mutating
+      const px0 = player.x, py0 = player.y; let threw = false; try { render(); } catch(e){ threw = true; console.error(e);} console.assert(!threw, 'render() should not throw');
+      console.assert(player.x===px0 && player.y===py0, 'render must not mutate player position');
+      // update no-move when no input
+      const x0=player.x, y0=player.y; update(0); console.assert(player.x===x0 && player.y===y0, 'update(0) should not move player');
+
       console.log('[Smoke] OK');
       showToast('Smoke OK');
     }catch(err){ console.error('Self-test failed', err); }

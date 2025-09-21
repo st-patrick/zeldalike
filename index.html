@@ -24,7 +24,7 @@
   <div id="overlay">
     <div id="panel">
       <h1>Zelda‑like MVP</h1>
-      <p class="muted">Top‑down rectangles only. Keyboard + Gamepad. Includes: movement, sword attack & hit, enemies, hearts, rupees, chest, sign, pushable block, doors, grass, cracked walls, pots, bombs, boomerang, bow, switches.</p>
+      <p class="muted">Top‑down rectangles only. Keyboard + Gamepad. Includes: movement, sword, enemies, hearts, rupees, chest, sign, <b>push</b> blocks, doors (normal & locked), grass, cracked walls, pots, bombs, boomerang, bow, switches.</p>
       <ul class="muted">
         <li><b>Move:</b> <code>WASD</code> / <code>Arrows</code> / Left‑stick / D‑pad</li>
         <li><b>Attack/Use:</b> <code>J</code> / <code>Space</code> / Gamepad <code>A (0)</code></li>
@@ -51,259 +51,115 @@
 
 <script>
 (() => {
-  // ===== Helpers =====
-  const TAU = Math.PI*2;
+  // ===== Minimal helpers (favor tiny pure fns) =====
+  const TAU = Math.PI*2, tileSize = 16;
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
   const now = () => performance.now();
   const rectsOverlap = (a,b)=> a.x<b.x+b.w && b.x<a.x+a.w && a.y<b.y+b.h && b.y<a.y+a.h;
-  const tileSize = 16; // world tile size in pixels (world units)
+  const showToast=(msg,ms=1400)=>{ const t=document.getElementById('toast'); t.textContent=msg; t.style.opacity=1; clearTimeout(showToast._t); showToast._t=setTimeout(()=>t.style.opacity=0,ms); };
 
-  // ===== Canvas & View =====
+  // Canvas
   const canvas = document.getElementById('game');
   const ctx = canvas.getContext('2d');
-  let view = { w: 320, h: 180, scale: 3, shake: 0, x:0, y:0 };
+  let view = { w:320, h:180, scale:3, shake:0, x:0, y:0 };
+  const resize = () => { const s=Math.floor(Math.min(innerWidth/view.w, innerHeight/view.h)); view.scale=Math.max(1,s); canvas.width=view.w*view.scale; canvas.height=view.h*view.scale; ctx.imageSmoothingEnabled=false; };
+  addEventListener('resize', resize); resize();
 
-  function resize() {
-    const maxScale = Math.floor(Math.min(window.innerWidth / view.w, window.innerHeight / view.h));
-    view.scale = Math.max(1, maxScale);
-    canvas.width = view.w * view.scale;
-    canvas.height = view.h * view.scale;
-    ctx.imageSmoothingEnabled = false;
-  }
-  window.addEventListener('resize', resize);
-  resize();
+  // Fullscreen & Start
+  const goFullscreen = async()=>{ try{ if(!document.fullscreenElement){ const req=document.documentElement.requestFullscreen||document.documentElement.webkitRequestFullscreen; if(req) await req.call(document.documentElement); } }catch{} };
+  addEventListener('keydown', e=>{ if(e.key.toLowerCase()==='f') goFullscreen(); });
 
-  // ===== Fullscreen =====
-  async function goFullscreen() {
-    const elem = document.documentElement;
-    if (!document.fullscreenElement) {
-      try { await elem.requestFullscreen(); } catch(e) {}
-    }
-  }
-  document.addEventListener('keydown', (e)=>{ if (e.key.toLowerCase()==='f') goFullscreen(); });
-  document.getElementById('startBtn').addEventListener('click', async ()=>{
-    await goFullscreen();
-    document.getElementById('overlay').style.display='none';
-    showToast('Press Esc to pause.');
-    startGame();
-  });
+  // ===== Safe localStorage (avoid TDZ-crashing on blocked storage) =====
+  const store={ get:k=>{ try{ return localStorage.getItem(k); }catch{ return null; } }, set:(k,v)=>{ try{ localStorage.setItem(k,v); }catch{} }, del:k=>{ try{ localStorage.removeItem(k); }catch{} } };
 
-  function showToast(msg, ms=1400){
-    const t = document.getElementById('toast');
-    t.textContent = msg; t.style.opacity=1; clearTimeout(showToast._t);
-    showToast._t = setTimeout(()=>t.style.opacity=0, ms);
-  }
-
-  // ===== Gamepad Slot Menu & Persistence =====
-  const PAD_STORE_KEY = 'zelda_mvp_pad_index';
-  let preferredPadIndex = null; // null => auto
-  let usedPadIndex = -1;
-  function loadPadPref(){
-    const v = localStorage.getItem(PAD_STORE_KEY);
-    if (v!==null){ const n = parseInt(v,10); preferredPadIndex = (Number.isNaN(n) || n<0) ? null : n; }
-  }
-  function chooseGamepad(pads, pref){
-    if (Number.isInteger(pref) && pref>=0 && pref<pads.length){ const p=pads[pref]; if (p && p.connected) return {gp:p, idx: pref}; }
-    for (let i=0;i<pads.length;i++){ const p=pads[i]; if (p && p.connected) return {gp:p, idx:i}; }
-    return {gp:null, idx:-1};
-  }
-  function populatePadSelect(){
-    const sel = document.getElementById('padSelect'); if (!sel) return;
-    sel.innerHTML = '<option value="-1">Auto (first active)</option>';
-    const pads = navigator.getGamepads ? navigator.getGamepads() : [];
-    for (let i=0;i<pads.length;i++){ const p=pads[i]; if(!p) continue; const o=document.createElement('option'); o.value=String(i); o.textContent=`[${i}] ${p.id||'Gamepad'}`; sel.appendChild(o); }
-    sel.value = preferredPadIndex==null? '-1' : String(preferredPadIndex);
-  }
-  function initPadMenu(){
-    loadPadPref();
-    populatePadSelect();
-    const rem = document.getElementById('rememberPad'); if (rem) rem.checked = localStorage.getItem(PAD_STORE_KEY)!==null;
-  }
-  initPadMenu();
+  // ===== Gamepad slot selection (persistable) =====
+  const PAD_STORE_KEY='zelda_mvp_pad_index'; let preferredPadIndex=null, usedPadIndex=-1, gpConnected=false, prevButtons=[];
+  const chooseGamepad=(pads,pref)=>{
+    const active=p=> p && (p.connected || (p.buttons&&p.buttons.some(b=>b.pressed)) || (p.axes&&p.axes.some(a=>Math.abs(a)>0.01)) || (typeof p.timestamp==='number'&&p.timestamp>0));
+    if(Number.isInteger(pref)&&pref>=0&&pref<pads.length){ const p=pads[pref]; if(active(p)) return {gp:p,idx:pref}; }
+    for(let i=0;i<pads.length;i++){ const p=pads[i]; if(active(p)) return {gp:p,idx:i}; }
+    for(let i=0;i<pads.length;i++){ const p=pads[i]; if(p) return {gp:p,idx:i}; }
+    return {gp:null,idx:-1};
+  };
+  const populatePadSelect=()=>{ const sel=document.getElementById('padSelect'); if(!sel) return; sel.innerHTML='<option value="-1">Auto (first active)</option>'; const pads=(navigator.getGamepads?navigator.getGamepads():[])||[]; for(let i=0;i<pads.length;i++){ const p=pads[i]; if(!p) continue; const o=document.createElement('option'); o.value=String(i); o.textContent=`[${i}] ${p.id||'Gamepad'}`; sel.appendChild(o); } sel.value=preferredPadIndex==null?'-1':String(preferredPadIndex); };
+  (function initPadMenu(){ const v=store.get(PAD_STORE_KEY); if(v!==null){ const n=+v; preferredPadIndex=(Number.isNaN(n)||n<0)?null:n; } populatePadSelect(); const rem=document.getElementById('rememberPad'); if(rem) rem.checked=v!==null; })();
   document.getElementById('rescanBtn').addEventListener('click', populatePadSelect);
-  document.getElementById('padSelect').addEventListener('change', (e)=>{
-    const v = parseInt(e.target.value,10); preferredPadIndex = (v>=0)?v:null;
-    const rem = document.getElementById('rememberPad'); if (rem && rem.checked) localStorage.setItem(PAD_STORE_KEY, String(v));
-  });
-  document.getElementById('rememberPad').addEventListener('change', (e)=>{
-    if (e.target.checked){ const v = document.getElementById('padSelect').value; localStorage.setItem(PAD_STORE_KEY, v); }
-    else localStorage.removeItem(PAD_STORE_KEY);
-  });
+  document.getElementById('padSelect').addEventListener('change', e=>{ const v=+e.target.value; preferredPadIndex=(v>=0)?v:null; const rem=document.getElementById('rememberPad'); if(rem&&rem.checked) store.set(PAD_STORE_KEY,String(v)); });
+  document.getElementById('rememberPad').addEventListener('change', e=>{ if(e.target.checked){ const v=document.getElementById('padSelect').value; store.set(PAD_STORE_KEY,v); } else store.del(PAD_STORE_KEY); });
+  addEventListener('gamepadconnected', e=>{ gpConnected=true; showToast('Gamepad: '+(e.gamepad&&(e.gamepad.id||'pad'))); populatePadSelect(); });
+  addEventListener('gamepaddisconnected', ()=>{ gpConnected=false; showToast('Gamepad disconnected'); populatePadSelect(); });
 
-  // ===== Input (Keyboard + Gamepad) =====
-  const input = {
-    up:false, down:false, left:false, right:false,
-    attack:false, interact:false, pause:false, cycle:false,
-    just:{attack:false, interact:false, pause:false, cycle:false}
-  };
-  const keys = new Set();
-  const pressEdge = new Set();
-  let PADDBG = false;
-  const KEYMAP = {
-    'arrowup':'up','w':'up', 'arrowdown':'down','s':'down', 'arrowleft':'left','a':'left','arrowright':'right','d':'right',
-    'j':'attack',' ':'attack', 'k':'interact','e':'interact', 'enter':'interact', 'escape':'pause','q':'cycle'
-  };
-  addEventListener('keydown', e=>{ if (e.key===';'){ PADDBG=!PADDBG; return; }
-    const k = KEYMAP[e.key.toLowerCase()]; if(!k) return;
-    e.preventDefault();
-    keys.add(k); pressEdge.add(k);
-  });
-  addEventListener('keyup', e=>{ const k = KEYMAP[e.key.toLowerCase()]; if(!k) return; keys.delete(k); });
-
-  let prevButtons = [];
-  let gpConnected = false;
-  window.addEventListener('gamepadconnected', e=>{ gpConnected = true; showToast('Gamepad connected: '+(e.gamepad && (e.gamepad.id||'pad'))); populatePadSelect(); });
-  window.addEventListener('gamepaddisconnected', ()=>{ gpConnected = false; showToast('Gamepad disconnected'); populatePadSelect(); });
-  function pollGamepad() {
-    const pads = navigator.getGamepads ? navigator.getGamepads() : [];
-    const pick = chooseGamepad(pads, preferredPadIndex==null ? -1 : preferredPadIndex);
-    let gp = pick.gp; usedPadIndex = pick.idx;
-    // Reset; keyboard overrides gamepad if both are used
-    input.up = keys.has('up'); input.down = keys.has('down'); input.left = keys.has('left'); input.right = keys.has('right');
-    input.attack = keys.has('attack'); input.interact = keys.has('interact'); input.pause = keys.has('pause'); input.cycle = keys.has('cycle');
-    input.just.attack = pressEdge.has('attack'); input.just.interact = pressEdge.has('interact'); input.just.pause = pressEdge.has('pause'); input.just.cycle = pressEdge.has('cycle');
-
-    if (!gp) { gpConnected = false; prevButtons = []; pressEdge.clear(); return; } else { gpConnected = true; }
-
-    const b = i => (gp.buttons[i] && gp.buttons[i].pressed) ? 1 : 0;
-    const dead = v => Math.abs(v) > 0.25 ? v : 0;
-    const axX = dead(gp.axes[0]||0), axY = dead(gp.axes[1]||0);
-
-    const gLeft = axX < -0.25 || b(14);
-    const gRight = axX > 0.25 || b(15);
-    const gUp = axY < -0.25 || b(12);
-    const gDown = axY > 0.25 || b(13);
-
-    input.left = input.left || gLeft; input.right = input.right || gRight;
-    input.up = input.up || gUp; input.down = input.down || gDown;
-
-    const gAttack = b(0); // A
-    const gInteract = b(2) || b(3) || b(1); // X/Y/B
-    const gPause = b(9) || b(8);
-    const gCycle = b(5) || b(4); // RB/LB
-
-    input.attack = input.attack || !!gAttack;
-    input.interact = input.interact || !!gInteract;
-    input.pause = input.pause || !!gPause;
-    input.cycle = input.cycle || !!gCycle;
-
-    // edges
-    function justPressed(idx){ const prev = prevButtons[idx]||0; const cur = b(idx); prevButtons[idx]=cur; return !prev && cur; }
-    input.just.attack = input.just.attack || justPressed(0);
-    input.just.interact = input.just.interact || justPressed(2) || justPressed(3) || justPressed(1);
-    input.just.pause = input.just.pause || justPressed(9) || justPressed(8);
-    input.just.cycle = input.just.cycle || justPressed(5) || justPressed(4);
-
-    // Fallback for non-standard mappings: treat any face button as attack
-    if (gp.mapping !== 'standard'){
-      input.attack = input.attack || b(0)||b(1)||b(2)||b(3);
-      input.just.attack = input.just.attack || justPressed(1) || justPressed(2) || justPressed(3);
-    }
-
-    pressEdge.clear(); // consume keyboard edges once per frame
+  // ===== Input (keyboard + gamepad) =====
+  const input={up:false,down:false,left:false,right:false,attack:false,interact:false,pause:false,cycle:false, just:{attack:false,interact:false,pause:false,cycle:false}};
+  const keys=new Set(), pressEdge=new Set(); let PADDBG=false;
+  const KEYMAP={'arrowup':'up','w':'up','arrowdown':'down','s':'down','arrowleft':'left','a':'left','arrowright':'right','d':'right','j':'attack',' ':'attack','k':'interact','e':'interact','enter':'interact','escape':'pause','q':'cycle',';':';'};
+  addEventListener('keydown',e=>{ const k=KEYMAP[e.key.toLowerCase()]; if(!k) return; if(k===';'){ PADDBG=!PADDBG; return; } e.preventDefault(); keys.add(k); pressEdge.add(k); });
+  addEventListener('keyup',e=>{ const k=KEYMAP[e.key.toLowerCase()]; if(!k||k===';') return; keys.delete(k); });
+  function pollGamepad(){
+    const pads=navigator.getGamepads?navigator.getGamepads():[]; const pick=chooseGamepad(pads,preferredPadIndex==null?-1:preferredPadIndex); const gp=pick.gp; usedPadIndex=pick.idx;
+    // seed with keyboard
+    Object.assign(input,{up:keys.has('up'),down:keys.has('down'),left:keys.has('left'),right:keys.has('right'),attack:keys.has('attack'),interact:keys.has('interact'),pause:keys.has('pause'),cycle:keys.has('cycle')});
+    Object.assign(input.just,{attack:pressEdge.has('attack'),interact:pressEdge.has('interact'),pause:pressEdge.has('pause'),cycle:pressEdge.has('cycle')});
+    if(!gp){ gpConnected=false; prevButtons=[]; pressEdge.clear(); return; } gpConnected=true;
+    const b=i=> (gp.buttons[i]&&gp.buttons[i].pressed)?1:0, dead=v=> Math.abs(v)>0.25?v:0; const ax=dead(gp.axes[0]||0), ay=dead(gp.axes[1]||0);
+    input.left ||= ax<-0.25 || b(14); input.right ||= ax>0.25 || b(15); input.up ||= ay<-0.25 || b(12); input.down ||= ay>0.25 || b(13);
+    const gAttack=b(0), gInteract=b(2)||b(3)||b(1), gPause=b(9)||b(8), gCycle=b(5)||b(4);
+    input.attack ||= !!gAttack; input.interact ||= !!gInteract; input.pause ||= !!gPause; input.cycle ||= !!gCycle;
+    const just=(i)=>{ const p=prevButtons[i]||0, c=b(i); prevButtons[i]=c; return !p&&c; };
+    input.just.attack ||= just(0); input.just.interact ||= just(2)||just(3)||just(1); input.just.pause ||= just(9)||just(8); input.just.cycle ||= just(5)||just(4);
+    if(gp.mapping!=='standard'){ input.attack ||= b(0)||b(1)||b(2)||b(3); input.just.attack ||= just(1)||just(2)||just(3); }
+    pressEdge.clear();
   }
 
-  // ===== World & Entities =====
-  const world = {
-    tiles: [], w: 0, h: 0, 
-    solids: new Set(['#','@','B','D','P','X']), // impassable: wall, pillar, pushBlock, door (locked), pot, cracked
-    chests: [], signs: [], pushBlocks: [], enemies: [], rupees: [], doors: [], switches: []
-  };
+  // ===== World =====
+  const world={tiles:[],w:0,h:0, solids:new Set(['#','@','B','D','L','P','X']), chests:[], signs:[], pushBlocks:[], enemies:[], rupees:[], doors:[], switches:[] };
+  const tileAt=(px,py)=>{ const x=(px/tileSize)|0, y=(py/tileSize)|0; if(x<0||y<0||x>=world.w||y>=world.h) return '#'; return world.tiles[y][x]; };
+  const isSolidTile=(px,py)=> world.solids.has(tileAt(px,py));
+  const rectBlocked=(x,y,w,h)=> isSolidTile(x,y)||isSolidTile(x+w-1,y)||isSolidTile(x,y+h-1)||isSolidTile(x+w-1,y+h-1);
 
-  function loadMap(strings) {
-    world.tiles = strings.map(s=>s.split(''));
-    world.h = world.tiles.length; world.w = world.tiles[0].length;
+  function loadMap(rows){
+    world.tiles=rows.map(s=>s.split('')); world.h=world.tiles.length; world.w=world.tiles[0].length;
     world.chests.length = world.signs.length = world.pushBlocks.length = world.enemies.length = world.rupees.length = world.doors.length = world.switches.length = 0;
-    for (let y=0; y<world.h; y++) for (let x=0; x<world.w; x++) {
-      const t = world.tiles[y][x];
-      if (t==='C') world.chests.push({x,y,open:false});
-      if (t==='S') world.signs.push({x,y,text:"It's dangerous to go alone! (Press Attack)", seen:false});
-      if (t==='B') world.pushBlocks.push({x,y});
-      if (t==='E') world.enemies.push(makeEnemy(x*tileSize+4,y*tileSize+4));
-      if (t==='r') world.rupees.push(makeRupee(x*tileSize+6,y*tileSize+6));
-      if (t==='D') world.doors.push({x,y,open:false});
-      if (t==='^') world.switches.push({x,y});
+    for(let y=0;y<world.h;y++) for(let x=0;x<world.w;x++){
+      const t=world.tiles[y][x];
+      if(t==='C') world.chests.push({x,y,open:false});
+      if(t==='S') world.signs.push({x,y,text:"It's dangerous to go alone! (Press Attack)",seen:false});
+      if(t==='B') world.pushBlocks.push({x,y});
+      if(t==='E') world.enemies.push(makeEnemy(x*tileSize+4,y*tileSize+4));
+      if(t==='r') world.rupees.push(makeRupee(x*tileSize+6,y*tileSize+6));
+      if(t==='D') world.doors.push({x,y,open:false,locked:false});
+      if(t==='L') world.doors.push({x,y,open:false,locked:true});
+      if(t==='^') world.switches.push({x,y});
     }
-  }
-
-  function tileAt(px,py){ const x=Math.floor(px/tileSize), y=Math.floor(py/tileSize); if (x<0||y<0||x>=world.w||y>=world.h) return '#'; return world.tiles[y][x]; }
-  function isSolidTile(px,py){ const t=tileAt(px,py); return world.solids.has(t); }
-
-  function rectBlocked(x,y,w,h){
-    // sample corners
-    return isSolidTile(x,y) || isSolidTile(x+w-1,y) || isSolidTile(x,y+h-1) || isSolidTile(x+w-1,y+h-1);
-  }
-
-  // === Push-block helpers ===
-  let pushTimer = 0;
-  function intersectsAnyPushBlock(x,y,w,h){
-    for (const b of world.pushBlocks){ const r={x:b.x*tileSize,y:b.y*tileSize,w:tileSize,h:tileSize}; if (x<r.x+r.w && r.x<x+w && y<r.y+r.h && r.y<y+h) return true; }
-    return false;
-  }
-  function handlePushBlocks(ix,iy,frame){
-    // Hold direction toward an adjacent block to shove it one tile if target is free.
-    if (Math.abs(ix)+Math.abs(iy)===0){ pushTimer=0; return; }
-    const px = Math.floor((player.x + player.w/2)/tileSize), py = Math.floor((player.y + player.h/2)/tileSize);
-    const dir = Math.abs(ix)>Math.abs(iy) ? (ix>0?'right':'left') : (iy>0?'down':'up');
-    const dx = dir==='right'?1:dir==='left'?-1:0, dy = dir==='down'?1:dir==='up'?-1:0;
-    const tx = px + dx, ty = py + dy; // block next to player
-    const block = world.pushBlocks.find(b=>b.x===tx && b.y===ty);
-    if (!block){ pushTimer=0; return; }
-    pushTimer += frame; if (pushTimer < 0.25) return; // require brief hold
-    const nx = tx + dx, ny = ty + dy; // destination tile for block
-    if (nx<0||ny<0||nx>=world.w||ny>=world.h) return;
-    const tNext = world.tiles[ny][nx];
-    const occupied = world.pushBlocks.some(b=>b!==block && b.x===nx && b.y===ny);
-    const solid = world.solids.has(tNext) && tNext!=='D' && tNext!=='^'; // allow pushing onto door/switch tiles
-    if (occupied || solid) return;
-    // move block
-    world.tiles[block.y][block.x] = '.';
-    block.x = nx; block.y = ny;
-    world.tiles[ny][nx] = 'B';
-    pushTimer = 0; view.shake = 2;
-    // interactions
-    const door = world.doors.find(d=>d.x===nx && d.y===ny && !d.open);
-    if (door){ door.open = true; world.tiles[ny][nx] = '.'; showToast('Door opened!'); }
-    const sw = world.switches.find(s=>s.x===nx && s.y===ny);
-    if (sw){ for (const d of world.doors){ if (!d.open){ d.open=true; world.tiles[d.y][d.x]='.'; } } showToast('Switch pressed'); }
   }
 
   // ===== Entities =====
-  const entities = [];
-  const spawners = { rupee: makeRupee };
-
-  function makeRupee(x,y){ return {type:'rupee', x,y,w:6,h:8, v:1, bob:0, remove:false}; }
-  function makeEnemy(x,y){ return {type:'enemy', x,y,w:10,h:10, vx:0, vy:0, speed:18, hp:2, hurtT:0, stunT:0, aiT:0, remove:false}; }
-  function swordHitbox(px,py,dir){
-    const s = {type:'sword', x:px, y:py, w:12, h:12, t:0.12, dir, remove:false};
-    if (dir==='right') { s.x+=10; s.y+=2; s.w=14; s.h=10; }
-    if (dir==='left') { s.x-=14; s.y+=2; s.w=14; s.h=10; }
-    if (dir==='up') { s.y-=14; s.x+=2; s.w=10; s.h=14; }
-    if (dir==='down') { s.y+=10; s.x+=2; s.w=10; s.h=14; }
-    return s;
-  }
-  function makeBomb(x,y){ return {type:'bomb', x,y,w:6,h:6, t:1.0, remove:false}; }
-  function makeExplosion(x,y){ return {type:'explosion', x:x-8, y:y-8, w:24, h:24, t:0.2, remove:false}; }
-  function makeBoomerang(x,y,dir){ const v=70; return {type:'boomerang', x,y,w:6,h:6, vx:dir==='right'?v:dir==='left'?-v:0, vy:dir==='down'?v:dir==='up'?-v:0, home:false, t:0.35, remove:false}; }
-  function makeArrow(x,y,dir){ const v=120; return {type:'arrow', x,y,w:6,h:2, vx:dir==='right'?v:dir==='left'?-v:0, vy:dir==='down'?v:dir==='up'?-v:0, remove:false}; }
-  function makePotProj(x,y,dir){ const v=80; return {type:'potProj', x,y,w:10,h:10, vx:dir==='right'?v:dir==='left'?-v:0, vy:dir==='down'?v:dir==='up'?-v:0, t:0.6, remove:false}; }
-  function makeHeart(x,y){ return {type:'heart', x,y,w:6,h:6, bob:0, remove:false}; }
+  const entities=[];
+  const makeRupee=(x,y)=>({type:'rupee',x,y,w:6,h:8,v:1,bob:0,remove:false});
+  const makeEnemy=(x,y)=>({type:'enemy',x,y,w:10,h:10,vx:0,vy:0,speed:18,hp:2,hurtT:0,stunT:0,aiT:0,remove:false});
+  const swordHitbox=(px,py,dir)=>{ const s={type:'sword',x:px,y:py,w:12,h:12,t:0.12,dir,remove:false}; if(dir==='right'){s.x+=10;s.y+=2;s.w=14;s.h=10;} if(dir==='left'){s.x-=14;s.y+=2;s.w=14;s.h=10;} if(dir==='up'){s.y-=14;s.x+=2;s.w=10;s.h=14;} if(dir==='down'){s.y+=10;s.x+=2;s.w=10;s.h=14;} return s; };
+  const makeBomb=(x,y)=>({type:'bomb',x,y,w:6,h:6,t:1.0,remove:false});
+  const makeExplosion=(x,y)=>({type:'explosion',x:x-8,y:y-8,w:24,h:24,t:0.2,remove:false});
+  const makeBoomerang=(x,y,dir)=>{ const v=70; return {type:'boomerang',x,y,w:6,h:6,vx:dir==='right'?v:dir==='left'?-v:0,vy:dir==='down'?v:dir==='up'?-v:0,home:false,t:0.35,remove:false}; };
+  const makeArrow=(x,y,dir)=>{ const v=120; return {type:'arrow',x,y,w:6,h:2,vx:dir==='right'?v:dir==='left'?-v:0,vy:dir==='down'?v:dir==='up'?-v:0,remove:false}; };
+  const makePotProj=(x,y,dir)=>{ const v=80; return {type:'potProj',x,y,w:10,h:10,vx:dir==='right'?v:dir==='left'?-v:0,vy:dir==='down'?v:dir==='up'?-v:0,t:0.6,remove:false}; };
+  const makeHeart=(x,y)=>({type:'heart',x,y,w:6,h:6,bob:0,remove:false});
 
   // ===== Player & Items =====
-  const player = { x: tileSize*4, y: tileSize*5, w:10, h:12, speed:44, dir:'down', hp:6, maxHp:6, iframes:0, rupees:0, attackCd:0, reading:null, paused:false, key:false, carry:null };
-  const items = ['sword','boomerang','bomb','bow']; let itemIdx = 0; const curItem = ()=>items[itemIdx];
+  const player={x:tileSize*4,y:tileSize*5,w:10,h:12,speed:44,dir:'down',hp:6,maxHp:6,iframes:0,rupees:0,attackCd:0,reading:null,paused:false,carry:null, keys:0, kbx:0,kby:0,kbT:0};
+  const items=['sword','boomerang','bomb','bow']; let itemIdx=0; const curItem=()=>items[itemIdx];
 
-  // ===== Sample Map =====
-  const map = [
+  // ===== Map with light narrative =====
+  const map=[
     '############################',
-    '#...G....P.....@....X......#',
+    '#..K..G..P.....@....X......#',
     '#..S..G.......@.......E....#',
     '#.............@............#',
     '#....#######...............#',
     '#....#..^..#....r....C.....#',
     '#....#..B..#...............#',
     '#....#.....#...............#',
-    '#....##D####...............#',
+    '#....##L####...............#',
     '#..............E...........#',
     '#..r.....G.......r.........#',
     '#..............@...........#',
@@ -319,364 +175,166 @@
     '############################'
   ];
   loadMap(map);
+  for(const r of world.rupees) entities.push(r);
+  for(const e of world.enemies) entities.push(e);
 
-  // Pre-populate entities with rupees & enemies from world lists (so we can animate them)
-  for (const r of world.rupees) entities.push(r);
-  for (const e of world.enemies) entities.push(e);
+  // ===== Push blocks =====
+  let pushTimer=0;
+  const intersectsAnyPushBlock=(x,y,w,h)=>{ for(const b of world.pushBlocks){ const r={x:b.x*tileSize,y:b.y*tileSize,w:tileSize,h:tileSize}; if(x<r.x+r.w&&r.x<x+w&&y<r.y+r.h&&r.y<y+h) return true; } return false; };
+  function handlePushBlocks(ix,iy,frame){ if(Math.abs(ix)+Math.abs(iy)===0){ pushTimer=0; return; } const px=((player.x+player.w/2)/tileSize)|0, py=((player.y+player.h/2)/tileSize)|0; const dir=Math.abs(ix)>Math.abs(iy)?(ix>0?'right':'left'):(iy>0?'down':'up'); const dx=dir==='right'?1:dir==='left'?-1:0, dy=dir==='down'?1:dir==='up'?-1:0; const tx=px+dx, ty=py+dy; const block=world.pushBlocks.find(b=>b.x===tx&&b.y===ty); if(!block){ pushTimer=0; return; } pushTimer+=frame; if(pushTimer<0.25) return; const nx=tx+dx, ny=ty+dy; if(nx<0||ny<0||nx>=world.w||ny>=world.h) return; const tNext=world.tiles[ny][nx]; const occupied=world.pushBlocks.some(b=>b!==block&&b.x===nx&&b.y===ny); const solid=world.solids.has(tNext)&&tNext!=='D'&&tNext!=='^'&&tNext!=='L'; if(occupied||solid) return; world.tiles[block.y][block.x]='.'; block.x=nx; block.y=ny; world.tiles[ny][nx]='B'; pushTimer=0; view.shake=2; const door=world.doors.find(d=>d.x===nx&&d.y===ny&&!d.open); if(door){ door.open=true; world.tiles[ny][nx]='.'; showToast('Door opened!'); } const sw=world.switches.find(s=>s.x===nx&&s.y===ny); if(sw){ for(const d of world.doors){ if(!d.open){ d.open=true; world.tiles[d.y][d.x]='.'; } } showToast('Switch pressed'); } }
 
-  // ===== Gameplay systems =====
-  let last = now(), dt = 1/60, gTime = 0;
-  let running = false;
-
-  function startGame(){
-    running = true; last = now();
-    runSelfTests();
-    requestAnimationFrame(loop);
-  }
-
-  function loop(){
-    if (!running) return;
-    const t = now(); const frame = Math.min(0.05, (t - last)/1000); last = t;
-    pollGamepad();
-    update(frame);
-    render();
-    requestAnimationFrame(loop);
-  }
-
-  addEventListener('visibilitychange', ()=>{ if (document.hidden) player.paused = true; });
+  // ===== Update =====
+  let gTime=0, running=false, last=now();
+  addEventListener('visibilitychange',()=>{ if(document.hidden) player.paused=true; });
+  function startGame(){ running=true; last=now(); runSelfTests(); requestAnimationFrame(loop); }
+  function loop(){ if(!running) return; const t=now(); const frame=Math.min(0.05,(t-last)/1000); last=t; pollGamepad(); update(frame); render(); requestAnimationFrame(loop); }
 
   function update(frame){
-    gTime += frame;
-    // Pause toggle
-    if (input.just.pause) player.paused = !player.paused;
-    if (player.paused) return;
+    gTime+=frame; if(input.just.pause) player.paused=!player.paused; if(player.paused) return;
+    if(input.just.cycle){ itemIdx=(itemIdx+1)%items.length; showToast('Item: '+curItem()); }
+    if(player.reading){ if(input.just.interact||input.just.attack) player.reading=null; return; }
 
-    // Item cycle
-    if (input.just.cycle){ itemIdx = (itemIdx+1)%items.length; showToast('Item: '+curItem()); }
+    // Movement + knockback
+    let mvx=(input.right?1:0)-(input.left?1:0), mvy=(input.down?1:0)-(input.up?1:0); if(Math.abs(mvx)+Math.abs(mvy)>0){ const l=Math.hypot(mvx,mvy); mvx/=l; mvy/=l; }
+    const speed=player.speed; if(Math.abs(mvx)>Math.abs(mvy)) player.dir=(mvx>0?'right':'left'); else if(Math.abs(mvy)>0) player.dir=(mvy>0?'down':'up');
+    if(player.kbT>0){ mvx+=player.kbx; mvy+=player.kby; player.kbT-=frame; player.kbx*=0.9; player.kby*=0.9; }
 
-    // Reading/sign dialog locks controls
-    if (player.reading){ if (input.just.interact || input.just.attack) { player.reading = null; } return; }
+    const next={x:player.x+mvx*speed*frame, y:player.y+mvy*speed*frame, w:player.w, h:player.h};
+    handlePushBlocks(mvx,mvy,frame);
+    if(!rectBlocked(next.x,player.y,player.w,player.h)&&!intersectsAnyPushBlock(next.x,player.y,player.w,player.h)) player.x=next.x;
+    if(!rectBlocked(player.x,next.y,player.w,player.h)&&!intersectsAnyPushBlock(player.x,next.y,player.w,player.h)) player.y=next.y;
 
-    // Movement
-    let mvx = (input.right?1:0) - (input.left?1:0);
-    let mvy = (input.down?1:0) - (input.up?1:0);
-    if (Math.abs(mvx)+Math.abs(mvy) > 0){ const l = Math.hypot(mvx,mvy); mvx/=l; mvy/=l; }
-    const speed = player.speed;
-
-    // Facing
-    if (Math.abs(mvx) > Math.abs(mvy)) player.dir = (mvx>0?'right':'left');
-    else if (Math.abs(mvy)>0) player.dir = (mvy>0?'down':'up');
-
-    // Attempt move with collision against solid tiles & push blocks
-    const next = { x: player.x + mvx*speed*frame, y: player.y + mvy*speed*frame, w: player.w, h: player.h };
-
-    // Push block interaction (hold direction to push one tile)
-    handlePushBlocks(mvx, mvy, frame);
-
-    if (!rectBlocked(next.x, player.y, player.w, player.h) && !intersectsAnyPushBlock(next.x, player.y, player.w, player.h)) player.x = next.x;
-    if (!rectBlocked(player.x, next.y, player.w, player.h) && !intersectsAnyPushBlock(player.x, next.y, player.w, player.h)) player.y = next.y;
-
-    // Attack / Item use
-    if (player.attackCd>0) player.attackCd -= frame;
-    if (input.just.attack && player.attackCd<=0){
-      // Throw carried pot first
-      if (player.carry==='pot'){ entities.push(makePotProj(player.x, player.y, player.dir)); player.carry=null; player.attackCd=0.15; }
-      else if (curItem()==='sword'){ entities.push(swordHitbox(player.x, player.y, player.dir)); player.attackCd = 0.22; }
-      else if (curItem()==='boomerang'){ entities.push(makeBoomerang(player.x+2, player.y+2, player.dir)); player.attackCd=0.25; }
-      else if (curItem()==='bomb'){ entities.push(makeBomb(player.x+2, player.y+6)); player.attackCd=0.15; }
-      else if (curItem()==='bow'){ entities.push(makeArrow(player.x+3, player.y+5, player.dir)); player.attackCd=0.18; }
+    // Attack / item
+    if(player.attackCd>0) player.attackCd-=frame;
+    if(input.just.attack && player.attackCd<=0){
+      if(player.carry==='pot'){ entities.push(makePotProj(player.x,player.y,player.dir)); player.carry=null; player.attackCd=0.15; }
+      else if(curItem()==='sword'){ entities.push(swordHitbox(player.x,player.y,player.dir)); player.attackCd=0.22; }
+      else if(curItem()==='boomerang'){ entities.push(makeBoomerang(player.x+2,player.y+2,player.dir)); player.attackCd=0.25; }
+      else if(curItem()==='bomb'){ entities.push(makeBomb(player.x+2,player.y+6)); player.attackCd=0.15; }
+      else if(curItem()==='bow'){ entities.push(makeArrow(player.x+3,player.y+5,player.dir)); player.attackCd=0.18; }
     }
 
-    // Interact: pot pickup, signs, chests, doors
-    if (input.just.interact){
-      if (tryPot()){} else if (trySign()){} else if (tryChest()){} else if (tryDoor()){}
+    // Interact
+    if(input.just.interact){ if(tryPot()){} else if(trySign()){} else if(tryChest()){} else if(tryDoor()){} }
+
+    // Auto-pickup key if stepping on K
+    const pcx=((player.x+player.w/2)/tileSize)|0, pcy=((player.y+player.h/2)/tileSize)|0; if(world.tiles[pcy]&&world.tiles[pcy][pcx]==='K'){ world.tiles[pcy][pcx]='.'; player.keys++; showToast('Got a small key'); }
+
+    // Entities logic
+    for(const e of entities){
+      if(e.type==='sword'){
+        e.t-=frame; if(e.t<=0) e.remove=true;
+        for(const en of entities) if(en.type==='enemy'&&!en.remove) if(rectsOverlap(e,en)){ en.hp-=1; en.hurtT=0.2; view.shake=3; if(en.hp<=0){ en.remove=true; entities.push(makeRupee(en.x+2,en.y+2)); } }
+        const sx=((e.x+e.w/2)/tileSize)|0, sy=((e.y+e.h/2)/tileSize)|0; if(world.tiles[sy]&&world.tiles[sy][sx]==='G'){ world.tiles[sy][sx]='.'; if(Math.random()<0.3) entities.push(Math.random()<0.5?makeHeart(sx*tileSize+5,sy*tileSize+4):makeRupee(sx*tileSize+6,sy*tileSize+6)); }
+      } else if(e.type==='enemy'){
+        if(e.stunT>0) e.stunT-=frame; else { e.aiT-=frame; if(e.aiT<=0){ e.aiT=0.8+Math.random()*1.2; const ang=Math.atan2(player.y-e.y,player.x-e.x); const bias=0.6, rand=(Math.random()-0.5)*TAU*(1-bias); e.vx=Math.cos(ang*bias+rand)*e.speed; e.vy=Math.sin(ang*bias+rand)*e.speed; } const nx=e.x+e.vx*frame*0.6, ny=e.y+e.vy*frame*0.6; if(!rectBlocked(nx,e.y,e.w,e.h)) e.x=nx; if(!rectBlocked(e.x,ny,e.w,e.h)) e.y=ny; }
+        if(e.hurtT>0) e.hurtT-=frame;
+        if(rectsOverlap(e,player) && player.iframes<=0){ player.hp-=1; player.iframes=1.0; view.shake=4; const dx=(player.x+player.w/2)-(e.x+e.w/2), dy=(player.y+player.h/2)-(e.y+e.h/2); const L=Math.hypot(dx,dy)||1; player.kbx=dx/L*1.6; player.kby=dy/L*1.6; player.kbT=0.18; }
+      } else if(e.type==='rupee'){ e.bob+=frame*4; if(rectsOverlap(e,player)){ player.rupees+=e.v; e.remove=true; showToast('Rupees: '+player.rupees); } }
+      else if(e.type==='heart'){ e.bob+=frame*3; if(rectsOverlap(e,player)){ player.hp=Math.min(player.maxHp,player.hp+1); e.remove=true; } }
+      else if(e.type==='bomb'){ e.t-=frame; if(e.t<=0){ e.remove=true; entities.push(makeExplosion(e.x,e.y)); const cx=(e.x/tileSize)|0, cy=(e.y/tileSize)|0; for(let yy=cy-1;yy<=cy+1;yy++) for(let xx=cx-1;xx<=cx+1;xx++) if(world.tiles[yy]&&world.tiles[yy][xx]==='X') world.tiles[yy][xx]='.'; } }
+      else if(e.type==='explosion'){ e.t-=frame; if(e.t<=0) e.remove=true; else { for(const en of entities) if(en.type==='enemy'&&!en.remove) if(rectsOverlap(e,en)){ en.hp-=2; en.hurtT=0.2; if(en.hp<=0){ en.remove=true; entities.push(makeRupee(en.x+2,en.y+2)); } } } }
+      else if(e.type==='boomerang'){ if(!e.home){ e.t-=frame; if(e.t<=0) e.home=true; } if(e.home){ const dx=(player.x-e.x),dy=(player.y-e.y),L=Math.hypot(dx,dy)||1; e.vx=dx/L*90; e.vy=dy/L*90; } const nx=e.x+e.vx*frame, ny=e.y+e.vy*frame; if(!rectBlocked(nx,ny,e.w,e.h)){ e.x=nx; e.y=ny; } else e.home=true; for(const en of entities) if(en.type==='enemy'&&!en.remove&&rectsOverlap(e,en)) en.stunT=0.6; if(rectsOverlap(e,player)&&e.home) e.remove=true; }
+      else if(e.type==='arrow'){ const nx=e.x+e.vx*frame, ny=e.y+e.vy*frame; if(rectBlocked(nx,ny,e.w,e.h)) e.remove=true; else { e.x=nx; e.y=ny; } for(const en of entities) if(en.type==='enemy'&&!en.remove&&rectsOverlap(e,en)){ en.hp-=1; en.hurtT=0.2; e.remove=true; if(en.hp<=0){ en.remove=true; entities.push(makeRupee(en.x+2,en.y+2)); } } }
+      else if(e.type==='potProj'){ e.t-=frame; const nx=e.x+e.vx*frame, ny=e.y+e.vy*frame; if(rectBlocked(nx,ny,e.w,e.h)){ e.remove=true; } else { e.x=nx; e.y=ny; } for(const en of entities) if(en.type==='enemy'&&!en.remove&&rectsOverlap(e,en)){ en.hp-=2; en.hurtT=0.2; e.remove=true; if(en.hp<=0){ en.remove=true; entities.push(makeRupee(en.x+2,en.y+2)); } } }
     }
 
-    // Entity updates & interactions (no drawing here)
-    for (const e of entities) {
-      if (e.type==='sword'){
-        e.t -= frame; if (e.t<=0) e.remove=true;
-        // Enemy damage
-        for (const en of entities) if (en.type==='enemy' && !en.remove){
-          if (rectsOverlap(e,en)){ en.hp -= 1; en.hurtT = 0.2; view.shake = 3; if (en.hp<=0) { en.remove=true; entities.push(makeRupee(en.x+2,en.y+2)); } }
-        }
-        // Cut grass & reveal
-        const sx = Math.floor((e.x+e.w/2)/tileSize), sy = Math.floor((e.y+e.h/2)/tileSize);
-        if (world.tiles[sy] && world.tiles[sy][sx]==='G'){ world.tiles[sy][sx]='.'; if (Math.random()<0.3) entities.push(Math.random()<0.5?makeHeart(sx*tileSize+5,sy*tileSize+4):makeRupee(sx*tileSize+6,sy*tileSize+6)); }
-      } else if (e.type==='enemy'){
-        if (e.stunT>0){ e.stunT-=frame; } else {
-          // simple wander/seek AI
-          e.aiT -= frame; if (e.aiT<=0){ e.aiT = 0.8 + Math.random()*1.2; const ang = Math.atan2(player.y-e.y, player.x-e.x); const bias = 0.6; const rand = (Math.random()-0.5)*TAU*(1-bias); e.vx = Math.cos(ang*bias+rand)*e.speed; e.vy = Math.sin(ang*bias+rand)*e.speed; }
-          const nx = e.x + e.vx*frame*0.6, ny = e.y + e.vy*frame*0.6;
-          if (!rectBlocked(nx,e.y,e.w,e.h)) e.x = nx; if (!rectBlocked(e.x,ny,e.w,e.h)) e.y = ny;
-        }
-        if (e.hurtT>0) e.hurtT -= frame;
-        // Contact damage
-        if (rectsOverlap(e, player) && player.iframes<=0){ player.hp -= 1; player.iframes = 1.0; view.shake = 4; }
-      } else if (e.type==='rupee'){
-        e.bob += frame*4;
-        if (rectsOverlap(e, player)) { player.rupees += e.v; e.remove=true; showToast('Rupees: '+player.rupees); }
-      } else if (e.type==='heart'){
-        e.bob += frame*3; if (rectsOverlap(e,player)) { player.hp = Math.min(player.maxHp, player.hp+1); e.remove=true; }
-      } else if (e.type==='bomb'){
-        e.t -= frame; if (e.t<=0){ e.remove=true; entities.push(makeExplosion(e.x, e.y));
-          // Break cracked walls adjacent
-          const cx=Math.floor(e.x/tileSize), cy=Math.floor(e.y/tileSize);
-          for (let yy=cy-1; yy<=cy+1; yy++) for (let xx=cx-1; xx<=cx+1; xx++) if (world.tiles[yy] && world.tiles[yy][xx]==='X') world.tiles[yy][xx]='.';
-        }
-      } else if (e.type==='explosion'){
-        e.t -= frame; if (e.t<=0) e.remove=true; else {
-          for (const en of entities) if (en.type==='enemy' && !en.remove) if (rectsOverlap(e,en)){ en.hp-=2; en.hurtT=0.2; if (en.hp<=0){ en.remove=true; entities.push(makeRupee(en.x+2,en.y+2)); } }
-        }
-      } else if (e.type==='boomerang'){
-        if (!e.home){ e.t -= frame; if (e.t<=0) e.home=true; }
-        if (e.home){ const dx=(player.x-e.x), dy=(player.y-e.y); const L=Math.hypot(dx,dy)||1; e.vx = dx/L*90; e.vy = dy/L*90; }
-        const nx=e.x+e.vx*frame, ny=e.y+e.vy*frame; if (!rectBlocked(nx,ny,e.w,e.h)){ e.x=nx; e.y=ny; } else { e.home=true; }
-        for (const en of entities) if (en.type==='enemy' && !en.remove && rectsOverlap(e,en)) en.stunT = 0.6;
-        if (rectsOverlap(e,player) && e.home) e.remove=true;
-      } else if (e.type==='arrow'){
-        const nx=e.x+e.vx*frame, ny=e.y+e.vy*frame; if (rectBlocked(nx,ny,e.w,e.h)){ e.remove=true; } else { e.x=nx; e.y=ny; }
-        for (const en of entities) if (en.type==='enemy' && !en.remove && rectsOverlap(e,en)){ en.hp-=1; en.hurtT=0.2; e.remove=true; if (en.hp<=0){ en.remove=true; entities.push(makeRupee(en.x+2,en.y+2)); } }
-      } else if (e.type==='potProj'){
-        e.t -= frame; const nx=e.x+e.vx*frame, ny=e.y+e.vy*frame; if (rectBlocked(nx,ny,e.w,e.h)){ e.remove=true; } else { e.x=nx; e.y=ny; }
-        for (const en of entities) if (en.type==='enemy' && !en.remove && rectsOverlap(e,en)){ en.hp-=2; en.hurtT=0.2; e.remove=true; if (en.hp<=0){ en.remove=true; entities.push(makeRupee(en.x+2,en.y+2)); } }
-      }
-    }
+    // Cleanup + i-frames
+    for(let i=entities.length-1;i>=0;i--) if(entities[i].remove) entities.splice(i,1);
+    if(player.iframes>0) player.iframes-=frame;
 
-    // Cleanup
-    for (let i=entities.length-1;i>=0;i--) if (entities[i].remove) entities.splice(i,1);
-
-    // I-frames
-    if (player.iframes>0) player.iframes -= frame;
-
-    // Switches: stepping on '^' (or pushing a block onto it) opens doors
-    for (const s of world.switches){
-      const pcx = Math.floor((player.x+player.w/2)/tileSize), pcy = Math.floor((player.y+player.h/2)/tileSize);
-      let pressed = (pcx===s.x && pcy===s.y);
-      if (!pressed) for (const b of world.pushBlocks){ if (b.x===s.x && b.y===s.y) { pressed=true; break; } }
-      if (pressed) for (const d of world.doors){ if (!d.open){ d.open=true; world.tiles[d.y][d.x]='.'; showToast('Door opened.'); } }
-    }
+    // Switches (player or block) open doors
+    for(const s of world.switches){ const pcx=((player.x+player.w/2)/tileSize)|0, pcy=((player.y+player.h/2)/tileSize)|0; let pressed=false; if(pcx===s.x&&pcy===s.y) pressed=true; if(!pressed) for(const b of world.pushBlocks){ if(b.x===s.x&&b.y===s.y){ pressed=true; break; } } if(pressed) for(const d of world.doors){ if(!d.open){ d.open=true; world.tiles[d.y][d.x]='.'; showToast('Door opened.'); } } }
 
     // Camera
-    view.x = clamp(player.x - view.w/2, 0, world.w*tileSize - view.w);
-    view.y = clamp(player.y - view.h/2, 0, world.h*tileSize - view.h);
-    if (view.shake>0){ view.shake = Math.max(0, view.shake - 12*frame); }
+    view.x=clamp(player.x-view.w/2,0,world.w*tileSize-view.w); view.y=clamp(player.y-view.h/2,0,world.h*tileSize-view.h); if(view.shake>0) view.shake=Math.max(0,view.shake-12*frame);
   }
 
   // ===== Render (draw-only) =====
+  const label4=(txt,x,y)=>{ ctx.save(); ctx.font='4px monospace'; ctx.fillStyle='black'; ctx.fillText(txt,x+1,y+1); ctx.fillStyle='#a5adbb'; ctx.fillText(txt,x,y); ctx.restore(); };
   function render(){
-    ctx.save();
-    ctx.imageSmoothingEnabled = false;
-    ctx.clearRect(0,0,canvas.width,canvas.height);
-
-    // Scale + camera + shake
-    ctx.scale(view.scale, view.scale);
-    const shakeX = (Math.random()-0.5)*view.shake;
-    const shakeY = (Math.random()-0.5)*view.shake;
-    ctx.translate(-(view.x|0)+shakeX, -(view.y|0)+shakeY);
+    ctx.save(); ctx.imageSmoothingEnabled=false; ctx.clearRect(0,0,canvas.width,canvas.height);
+    ctx.scale(view.scale,view.scale); const sx=(Math.random()-0.5)*view.shake, sy=(Math.random()-0.5)*view.shake; ctx.translate(-(view.x|0)+sx, -(view.y|0)+sy);
 
     // Tiles
-    for (let y=0;y<world.h;y++){
-      for (let x=0;x<world.w;x++){
-        const t = world.tiles[y][x];
-        const px = x*tileSize, py = y*tileSize;
-        // floor
-        ctx.fillStyle = '#0e1420'; ctx.fillRect(px,py,tileSize,tileSize);
-        // decorations / solids
-        if (t==='#'){ ctx.fillStyle='#203047'; ctx.fillRect(px,py,tileSize,tileSize); }
-        if (t==='@'){ ctx.fillStyle='#19273c'; ctx.fillRect(px,py,tileSize,tileSize); ctx.fillStyle='#263b58'; ctx.fillRect(px+3,py+3,tileSize-6,tileSize-6); }
-        if (t==='C'){ ctx.fillStyle='#5b3b1e'; ctx.fillRect(px+2,py+6,tileSize-4,8); ctx.fillStyle='#704822'; ctx.fillRect(px+2,py+4,tileSize-4,4); }
-        if (t==='G'){ ctx.fillStyle='#2f7032'; ctx.fillRect(px+2,py+2,tileSize-4,tileSize-4); }
-        if (t==='P'){ ctx.fillStyle='#6f6a5f'; ctx.fillRect(px+2,py+2,tileSize-4,tileSize-4); }
-        if (t==='S'){ ctx.fillStyle='#2d4e2d'; ctx.fillRect(px+2,py+2,tileSize-4,tileSize-4); }
-        if (t==='B'){ ctx.fillStyle='#3a3a52'; ctx.fillRect(px+1,py+1,tileSize-2,tileSize-2); }
-        if (t==='X'){ ctx.fillStyle='#533b3b'; ctx.fillRect(px+1,py+1,tileSize-2,tileSize-2); }
-        if (t==='^'){ ctx.fillStyle='#355b7a'; ctx.fillRect(px+3,py+6,tileSize-6,4); }
-        if (t==='D'){ ctx.fillStyle='#6a2a2a'; ctx.fillRect(px+1,py+1,tileSize-2,tileSize-2); }
-        // Interactive highlight
-        if (t==='C'||t==='S'||t==='D'||t==='B'||t==='P'||t==='G'||t==='^'||t==='X'){
-          const cx = px + tileSize/2, cy = py + tileSize/2;
-          const dx = (player.x+player.w/2) - cx, dy = (player.y+player.h/2) - cy; const d = Math.hypot(dx,dy);
-          const pulse = 0.45 + 0.45*Math.sin(gTime*6);
-          ctx.strokeStyle = 'rgba(124,201,255,' + (pulse * (d<28?1:0.6)).toFixed(2) + ')';
-          ctx.lineWidth = d<28 ? 1.5 : 1; ctx.strokeRect(px+0.5, py+0.5, tileSize-1, tileSize-1);
-        }
-        // Labels for tiles
-        const _nm = ({'C':'Chest','S':'Sign','D':'Door','B':'Block','P':'Pot','G':'Grass','^':'Switch','X':'Cracked','@':'Pillar','#':'Wall'})[t];
-        if (_nm){ ctx.save(); ctx.font='4px monospace'; ctx.fillStyle='black'; ctx.fillText(_nm, px+1, py+11); ctx.fillStyle='#a5adbb'; ctx.fillText(_nm, px, py+10); ctx.restore(); }
-      }
+    for(let y=0;y<world.h;y++) for(let x=0;x<world.w;x++){
+      const t=world.tiles[y][x], px=x*tileSize, py=y*tileSize; ctx.fillStyle='#0e1420'; ctx.fillRect(px,py,tileSize,tileSize);
+      if(t==='#'){ ctx.fillStyle='#203047'; ctx.fillRect(px,py,tileSize,tileSize); }
+      if(t==='@'){ ctx.fillStyle='#19273c'; ctx.fillRect(px,py,tileSize,tileSize); ctx.fillStyle='#263b58'; ctx.fillRect(px+3,py+3,tileSize-6,tileSize-6); }
+      if(t==='C'){ ctx.fillStyle='#5b3b1e'; ctx.fillRect(px+2,py+6,tileSize-4,8); ctx.fillStyle='#704822'; ctx.fillRect(px+2,py+4,tileSize-4,4); }
+      if(t==='G'){ ctx.fillStyle='#2f7032'; ctx.fillRect(px+2,py+2,tileSize-4,tileSize-4); }
+      if(t==='P'){ ctx.fillStyle='#6f6a5f'; ctx.fillRect(px+2,py+2,tileSize-4,tileSize-4); }
+      if(t==='S'){ ctx.fillStyle='#2d4e2d'; ctx.fillRect(px+2,py+2,tileSize-4,tileSize-4); }
+      if(t==='B'){ ctx.fillStyle='#3a3a52'; ctx.fillRect(px+1,py+1,tileSize-2,tileSize-2); }
+      if(t==='X'){ ctx.fillStyle='#533b3b'; ctx.fillRect(px+1,py+1,tileSize-2,tileSize-2); }
+      if(t==='^'){ ctx.fillStyle='#355b7a'; ctx.fillRect(px+3,py+6,tileSize-6,4); }
+      if(t==='D'||t==='L'){ ctx.fillStyle= t==='L' ? '#8a2a2a' : '#6a2a2a'; ctx.fillRect(px+1,py+1,tileSize-2,tileSize-2); }
+      if(t==='K'){ ctx.fillStyle='#c7a84a'; ctx.fillRect(px+4,py+6,8,6); }
+      if('CSDLBP G^XK'.includes(t)){ const near=Math.hypot((player.x+player.w/2)-(px+8),(player.y+player.h/2)-(py+8))<28; ctx.strokeStyle='rgba(124,201,255,'+(0.45+0.45*Math.sin(gTime*6))*(near?1:0.6)+')'; ctx.lineWidth=near?1.5:1; ctx.strokeRect(px+0.5,py+0.5,tileSize-1,tileSize-1); }
+      const name={'C':'Chest','S':'Sign','D':'Door','L':'Locked','B':'Block','P':'Pot','G':'Grass','^':'Switch','X':'Cracked','@':'Pillar','#':'Wall','K':'Key'}[t]; if(name) label4(name,px,py+10);
     }
 
-    // Entities (draw-only)
-    for (const e of entities){
-      if (e.type==='enemy'){
-        ctx.fillStyle = e.stunT>0 ? '#b6c5ff' : (e.hurtT>0 ? '#ffaaaa' : '#8ad0ff');
-        ctx.fillRect(e.x, e.y, e.w, e.h);
-        ctx.save(); ctx.font='4px monospace'; ctx.fillStyle='black'; ctx.fillText('ENEMY', e.x+1, e.y-1); ctx.fillStyle='#a5adbb'; ctx.fillText('ENEMY', e.x, e.y-2); ctx.restore();
-      } else if (e.type==='rupee'){
-        const bob = Math.sin(e.bob)*1.5; ctx.fillStyle = '#67e08d'; ctx.fillRect(e.x, e.y + bob, e.w, e.h);
-        ctx.save(); ctx.font='4px monospace'; ctx.fillStyle='black'; ctx.fillText('RUPEE', e.x+1, e.y-1); ctx.fillStyle='#a5adbb'; ctx.fillText('RUPEE', e.x, e.y-2); ctx.restore();
-      } else if (e.type==='heart'){
-        const bob = Math.sin(e.bob)*1.2; ctx.fillStyle='#ff6b7a'; ctx.fillRect(e.x, e.y + bob, e.w, e.h);
-        ctx.save(); ctx.font='4px monospace'; ctx.fillStyle='black'; ctx.fillText('HEART', e.x+1, e.y-1); ctx.fillStyle='#a5adbb'; ctx.fillText('HEART', e.x, e.y-2); ctx.restore();
-      } else if (e.type==='sword'){
-        ctx.fillStyle = '#f0e28a'; ctx.fillRect(e.x, e.y, e.w, e.h);
-        ctx.save(); ctx.font='4px monospace'; ctx.fillStyle='black'; ctx.fillText('SWORD', e.x+1, e.y-1); ctx.fillStyle='#a5adbb'; ctx.fillText('SWORD', e.x, e.y-2); ctx.restore();
-      } else if (e.type==='bomb'){
-        ctx.fillStyle='#444'; ctx.fillRect(e.x,e.y,e.w,e.h);
-        ctx.save(); ctx.font='4px monospace'; ctx.fillStyle='black'; ctx.fillText('BOMB', e.x+1, e.y-1); ctx.fillStyle='#a5adbb'; ctx.fillText('BOMB', e.x, e.y-2); ctx.restore();
-      } else if (e.type==='explosion'){
-        ctx.fillStyle='rgba(255,210,120,0.8)'; ctx.fillRect(e.x,e.y,e.w,e.h);
-        ctx.save(); ctx.font='4px monospace'; ctx.fillStyle='black'; ctx.fillText('EXP', e.x+1, e.y-1); ctx.fillStyle='#a5adbb'; ctx.fillText('EXP', e.x, e.y-2); ctx.restore();
-      } else if (e.type==='boomerang'){
-        ctx.fillStyle='#bde0ff'; ctx.fillRect(e.x,e.y,e.w,e.h);
-        ctx.save(); ctx.font='4px monospace'; ctx.fillStyle='black'; ctx.fillText('BOOM', e.x+1, e.y-1); ctx.fillStyle='#a5adbb'; ctx.fillText('BOOM', e.x, e.y-2); ctx.restore();
-      } else if (e.type==='arrow'){
-        ctx.fillStyle='#e9edf5'; ctx.fillRect(e.x,e.y,e.w,e.h);
-        ctx.save(); ctx.font='4px monospace'; ctx.fillStyle='black'; ctx.fillText('ARROW', e.x+1, e.y-1); ctx.fillStyle='#a5adbb'; ctx.fillText('ARROW', e.x, e.y-2); ctx.restore();
-      } else if (e.type==='potProj'){
-        ctx.fillStyle='#6f6a5f'; ctx.fillRect(e.x,e.y,e.w,e.h);
-        ctx.save(); ctx.font='4px monospace'; ctx.fillStyle='black'; ctx.fillText('POT', e.x+1, e.y-1); ctx.fillStyle='#a5adbb'; ctx.fillText('POT', e.x, e.y-2); ctx.restore();
-      }
+    // Entities
+    for(const e of entities){
+      if(e.type==='enemy'){ ctx.fillStyle=e.stunT>0?'#b6c5ff':(e.hurtT>0?'#ffaaaa':'#8ad0ff'); ctx.fillRect(e.x,e.y,e.w,e.h); label4('ENEMY',e.x,e.y-2); }
+      else if(e.type==='rupee'){ const bob=Math.sin(e.bob)*1.5; ctx.fillStyle='#67e08d'; ctx.fillRect(e.x,e.y+bob,e.w,e.h); label4('RUPEE',e.x,e.y-2); }
+      else if(e.type==='heart'){ const bob=Math.sin(e.bob)*1.2; ctx.fillStyle='#ff6b7a'; ctx.fillRect(e.x,e.y+bob,e.w,e.h); label4('HEART',e.x,e.y-2); }
+      else if(e.type==='sword'){ ctx.fillStyle='#f0e28a'; ctx.fillRect(e.x,e.y,e.w,e.h); label4('SWORD',e.x,e.y-2); }
+      else if(e.type==='bomb'){ ctx.fillStyle='#444'; ctx.fillRect(e.x,e.y,e.w,e.h); label4('BOMB',e.x,e.y-2); }
+      else if(e.type==='explosion'){ ctx.fillStyle='rgba(255,210,120,0.8)'; ctx.fillRect(e.x,e.y,e.w,e.h); label4('EXP',e.x,e.y-2); }
+      else if(e.type==='boomerang'){ ctx.fillStyle='#bde0ff'; ctx.fillRect(e.x,e.y,e.w,e.h); label4('BOOM',e.x,e.y-2); }
+      else if(e.type==='arrow'){ ctx.fillStyle='#e9edf5'; ctx.fillRect(e.x,e.y,e.w,e.h); label4('ARROW',e.x,e.y-2); }
+      else if(e.type==='potProj'){ ctx.fillStyle='#6f6a5f'; ctx.fillRect(e.x,e.y,e.w,e.h); label4('POT',e.x,e.y-2); }
     }
 
     // Player
-    if (!player.paused){
-      ctx.fillStyle = player.iframes>0 ? '#ffd3d3' : '#f1f3f7';
-      ctx.fillRect(player.x, player.y, player.w, player.h);
-      if (player.carry==='pot'){ ctx.fillStyle='#6f6a5f'; ctx.fillRect(player.x, player.y-6, 10, 6); }
-      ctx.fillStyle = '#7cc9ff';
-      const fx = player.dir==='right'?player.x+player.w: player.dir==='left'?player.x-2: player.x+player.w/2-1;
-      const fy = player.dir==='down'?player.y+player.h: player.dir==='up'?player.y-2: player.y+player.h/2-1;
-      ctx.fillRect(fx, fy, 2, 2);
-    }
+    if(!player.paused){ ctx.fillStyle=player.iframes>0?'#ffd3d3':'#f1f3f7'; ctx.fillRect(player.x,player.y,player.w,player.h); if(player.carry==='pot'){ ctx.fillStyle='#6f6a5f'; ctx.fillRect(player.x,player.y-6,10,6); } ctx.fillStyle='#7cc9ff'; const fx=player.dir==='right'?player.x+player.w:player.dir==='left'?player.x-2:player.x+player.w/2-1, fy=player.dir==='down'?player.y+player.h:player.dir==='up'?player.y-2:player.y+player.h/2-1; ctx.fillRect(fx,fy,2,2); }
 
-    // HUD (no camera transform)
+    // HUD
     ctx.restore();
-
     // Hearts
-    const hearts = Math.ceil(player.maxHp/2);
-    for (let i=0;i<hearts;i++){
-      const full = player.hp/2 > i;
-      const half = player.hp/2 > i && player.hp%2===1 && Math.floor(player.hp/2)===i;
-      const x = 10 + i*12, y = 10;
-      ctx.fillStyle = '#222'; ctx.fillRect(x, y, 10, 8);
-      ctx.fillStyle = full? '#ff5f6d' : half? '#ffb3b9' : '#444';
-      ctx.fillRect(x+1, y+1, 8, 6);
-    }
-
-    // Rupees + item + pad icon
-    ctx.fillStyle = '#67e08d'; ctx.fillRect(10, 24, 8, 10); ctx.fillStyle='#e9edf5'; ctx.fillText('x '+player.rupees, 22, 33);
+    const hearts=Math.ceil(player.maxHp/2); for(let i=0;i<hearts;i++){ const full=player.hp/2>i; const half=player.hp/2>i && player.hp%2===1 && Math.floor(player.hp/2)===i; const x=10+i*12,y=10; ctx.fillStyle='#222'; ctx.fillRect(x,y,10,8); ctx.fillStyle=full?'#ff5f6d':half?'#ffb3b9':'#444'; ctx.fillRect(x+1,y+1,8,6); }
+    // Rupees + item + keys + pad
+    ctx.fillStyle='#67e08d'; ctx.fillRect(10,24,8,10); ctx.fillStyle='#e9edf5'; ctx.fillText('x '+player.rupees,22,33);
+    ctx.fillStyle='#c7a84a'; ctx.fillRect(80,24,8,10); ctx.fillStyle='#e9edf5'; ctx.fillText('x '+player.keys,92,33);
     ctx.fillText(curItem().toUpperCase(), canvas.width-80, 33);
-    if (gpConnected) ctx.fillText('🎮#'+(usedPadIndex>=0?usedPadIndex:'?'), canvas.width - 52, 14);
-    if (PADDBG){
-      const gp=(navigator.getGamepads&&navigator.getGamepads()[0])||null;
-      if(gp){ ctx.fillText('axes:'+gp.axes.slice(0,2).map(v=>v.toFixed(2)).join(','),10,canvas.height-24); const pressed=gp.buttons.map(b=>b.pressed?1:0).join(''); ctx.fillText('btns:'+pressed,10,canvas.height-10);} 
-    }
+    if(gpConnected) ctx.fillText('🎮#'+(usedPadIndex>=0?usedPadIndex:'?'), canvas.width-52, 14);
+    if(PADDBG){ const gp=(navigator.getGamepads&&navigator.getGamepads()[0])||null; if(gp){ ctx.fillText('axes:'+gp.axes.slice(0,2).map(v=>v.toFixed(2)).join(','),10,canvas.height-24); const pressed=gp.buttons.map(b=>b.pressed?1:0).join(''); ctx.fillText('btns:'+pressed,10,canvas.height-10); } }
 
-    // Interact hints
-    const hint = nearestHint();
-    if (hint){ ctx.fillStyle='rgba(0,0,0,.6)'; ctx.fillRect(canvas.width/2-80, 6, 160, 16); ctx.fillStyle='#e9edf5'; ctx.fillText(hint, canvas.width/2-74, 18); }
-
-    // Dialog / Pause
-    if (player.reading){ drawPanel('Sign', player.reading + '\n(Press Interact to close)'); }
-    if (player.paused){ drawPanel('Paused', 'Press Pause/Start to resume.'); }
+    // Hint + panels
+    const hint=nearestHint(); if(hint){ ctx.fillStyle='rgba(0,0,0,.6)'; ctx.fillRect(canvas.width/2-90,6,180,16); ctx.fillStyle='#e9edf5'; ctx.fillText(hint, canvas.width/2-84, 18); }
+    if(player.reading) drawPanel('Sign', player.reading+'\n(Press Interact to close)');
+    if(player.paused) drawPanel('Paused','Press Pause/Start to resume.');
   }
 
-  function nearestHint(){
-    const near = (tx,ty,r=18)=> Math.hypot((player.x+player.w/2)-(tx*tileSize+8),(player.y+player.h/2)-(ty*tileSize+8))<r;
-    for (const s of world.signs) if (near(s.x,s.y)) return 'Read (E / X)';
-    for (const c of world.chests) if (!c.open && near(c.x,c.y)) return 'Open (E / X)';
-    for (const d of world.doors) if (near(d.x,d.y)) return 'Open (E / X)';
-    const px = Math.floor((player.x + player.w/2)/tileSize), py = Math.floor((player.y + player.h/2)/tileSize);
-    for (const b of world.pushBlocks){ if (Math.abs(b.x-px)+Math.abs(b.y-py)===1) return 'Push (hold toward)'; }
-    return '';
+  // ===== Interactables =====
+  const nearestHint=()=>{ const near=(tx,ty,r=18)=> Math.hypot((player.x+player.w/2)-(tx*tileSize+8),(player.y+player.h/2)-(ty*tileSize+8))<r; for(const s of world.signs) if(near(s.x,s.y)) return 'Read (E / X)'; for(const c of world.chests) if(!c.open&&near(c.x,c.y)) return 'Open (E / X)'; for(const d of world.doors){ if(near(d.x,d.y)) return d.locked? (player.keys>0?'Unlock (E)':'Locked') : 'Open (E)'; } const px=((player.x+player.w/2)/tileSize)|0, py=((player.y+player.h/2)/tileSize)|0; for(const b of world.pushBlocks) if(Math.abs(b.x-px)+Math.abs(b.y-py)===1) return 'Push (hold toward)'; if(world.tiles[py]&&world.tiles[py][px]==='K') return 'Take key'; return ''; };
+  function drawPanel(title,text){ const w=Math.min(280,canvas.width-40),h=100,x=(canvas.width-w)/2,y=canvas.height-h-20; ctx.fillStyle='rgba(0,0,0,.7)'; ctx.fillRect(x,y,w,h); ctx.strokeStyle='rgba(255,255,255,.15)'; ctx.strokeRect(x+0.5,y+0.5,w-1,h-1); ctx.fillStyle='#e9edf5'; ctx.fillText(title,x+10,y+18); wrapText(ctx,text,x+10,y+34,w-20,14); }
+  function wrapText(c,t,x,y,maxW,lh){ const wds=(''+t).split(/\s+/); let line=''; for(let n=0;n<wds.length;n++){ const test=line+wds[n]+' '; const w=c.measureText(test).width; if(w>maxW&&n>0){ c.fillText(line,x,y); line=wds[n]+' '; y+=lh; } else line=test; } c.fillText(line,x,y); }
+  function trySign(){ for(const s of world.signs){ const r={x:s.x*tileSize,y:s.y*tileSize,w:tileSize,h:tileSize}; const near=Math.hypot((player.x+player.w/2)-(r.x+r.w/2),(player.y+player.h/2)-(r.y+r.h/2))<22; if(near){ player.reading=s.text; s.seen=true; return true; } } return false; }
+  function tryChest(){ for(const c of world.chests){ const r={x:c.x*tileSize,y:c.y*tileSize,w:tileSize,h:tileSize}; const near=Math.hypot((player.x+player.w/2)-(r.x+r.w/2),(player.y+player.h/2)-(r.y+r.h/2))<22; if(near&&!c.open){ c.open=true; for(let i=0;i<3;i++) entities.push(makeRupee(r.x+4+i*3,r.y+4)); showToast('Chest opened!'); return true; } } return false; }
+  function tryDoor(){ for(const d of world.doors){ const r={x:d.x*tileSize,y:d.y*tileSize,w:tileSize,h:tileSize}; const near=Math.hypot((player.x+player.w/2)-(r.x+r.w/2),(player.y+player.h/2)-(r.y+r.h/2))<22; if(near&&!d.open){ if(d.locked){ if(player.keys>0){ player.keys--; d.open=true; world.tiles[d.y][d.x]='.'; showToast('Unlocked door.'); return true; } else { showToast('It\'s locked'); return true; } } else { d.open=true; world.tiles[d.y][d.x]='.'; showToast('Door opened.'); return true; } } } return false; }
+  function tryPot(){ if(player.carry) return false; const px=((player.x+player.w/2)/tileSize)|0, py=((player.y+player.h/2)/tileSize)|0; for(const [dx,dy] of [[1,0],[-1,0],[0,1],[0,-1]]){ const tx=px+dx,ty=py+dy; if(world.tiles[ty]&&world.tiles[ty][tx]==='P'){ world.tiles[ty][tx]='.'; player.carry='pot'; showToast('Picked up pot'); return true; } } return false; }
+
+  // ===== Smoke tests =====
+  function runSelfTests(){ try{
+      console.assert(typeof navigator.getGamepads==='function','Gamepad API missing');
+      console.assert(world.w>0&&world.h>0,'Map not loaded');
+      console.assert(Array.isArray(entities),'Entities array missing');
+      console.assert(typeof render==='function'&&typeof update==='function','Loops present');
+      let r=chooseGamepad([{connected:false},{connected:true},{connected:true}],2); console.assert(r.idx===2,'prefer specified'); r=chooseGamepad([{connected:false},{connected:true}],0); console.assert(r.idx===1,'skip disconnected 0'); r=chooseGamepad([{connected:true}],5); console.assert(r.idx===0,'oob → 0');
+      r=chooseGamepad([{connected:false,id:'ghost',buttons:[],axes:[]} , {connected:false,id:'real',buttons:[{pressed:false}],axes:[0]}], -1); console.assert(r.idx===1,'fallback to first non-null/active');
+      console.assert(typeof handlePushBlocks==='function','handlePushBlocks missing'); console.assert(typeof intersectsAnyPushBlock==='function','intersectsAnyPushBlock missing');
+      if(world.pushBlocks[0]){ const b=world.pushBlocks[0]; const hit=intersectsAnyPushBlock(b.x*tileSize,b.y*tileSize,tileSize,tileSize); console.assert(!!hit,'push-block hit self'); }
+      const px0=player.x,py0=player.y; let threw=false; try{ render(); }catch(e){ threw=true; } console.assert(!threw,'render() throws'); console.assert(player.x===px0&&player.y===py0,'render purity'); const x0=player.x,y0=player.y; update(0); console.assert(player.x===x0&&player.y===y0,'update(0) stationary');
+      console.log('[Smoke] OK'); showToast('Smoke OK');
+    }catch(err){ console.error('Self-test failed',err); }
   }
 
-  function drawPanel(title, text){
-    const w = Math.min(280, canvas.width-40), h=100;
-    const x = (canvas.width - w)/2, y = canvas.height - h - 20;
-    const ctx2 = ctx; ctx2.fillStyle='rgba(0,0,0,.7)'; ctx2.fillRect(x,y,w,h);
-    ctx2.strokeStyle='rgba(255,255,255,.15)'; ctx2.strokeRect(x+0.5,y+0.5,w-1,h-1);
-    ctx2.fillStyle='#e9edf5'; ctx2.fillText(title, x+10, y+18);
-    wrapText(ctx2, text, x+10, y+34, w-20, 14);
-  }
-  function wrapText(context, text, x, y, maxWidth, lineHeight){
-    const words = (''+text).split(/\s+/); let line='';
-    for (let n=0;n<words.length;n++){
-      const test = line + words[n] + ' ';
-      const w = context.measureText(test).width;
-      if (w > maxWidth && n>0){ context.fillText(line, x, y); line = words[n] + ' '; y += lineHeight; }
-      else line = test;
-    }
-    context.fillText(line, x, y);
-  }
-
-  function trySign(){
-    for (const s of world.signs){
-      const r = {x:s.x*tileSize, y:s.y*tileSize, w:tileSize, h:tileSize};
-      const near = Math.hypot((player.x+player.w/2)-(r.x+r.w/2),(player.y+player.h/2)-(r.y+r.h/2)) < 22;
-      if (near){ player.reading = s.text; s.seen = true; return true; }
-    }
-    return false;
-  }
-  function tryChest(){
-    for (const c of world.chests){
-      const r = {x:c.x*tileSize, y:c.y*tileSize, w:tileSize, h:tileSize};
-      const near = Math.hypot((player.x+player.w/2)-(r.x+r.w/2),(player.y+player.h/2)-(r.y+r.h/2)) < 22;
-      if (near && !c.open){ c.open=true; for (let i=0;i<3;i++) entities.push(makeRupee(r.x+4+i*3, r.y+4)); showToast('Chest opened!'); return true; }
-    }
-    return false;
-  }
-  function tryDoor(){
-    for (const d of world.doors){
-      const r = {x:d.x*tileSize, y:d.y*tileSize, w:tileSize, h:tileSize};
-      const near = Math.hypot((player.x+player.w/2)-(r.x+r.w/2),(player.y+player.h/2)-(r.y+r.h/2)) < 22;
-      if (near && !d.open){ d.open=true; world.tiles[d.y][d.x]='.'; showToast('Door opened.'); return true; }
-    }
-    return false;
-  }
-  function tryPot(){
-    if (player.carry) return false;
-    const px=Math.floor((player.x+player.w/2)/tileSize), py=Math.floor((player.y+player.h/2)/tileSize);
-    const dirs=[[1,0],[-1,0],[0,1],[0,-1]];
-    for (const [dx,dy] of dirs){ const tx=px+dx, ty=py+dy; if (world.tiles[ty] && world.tiles[ty][tx]==='P'){ world.tiles[ty][tx]='.'; player.carry='pot'; showToast('Picked up pot'); return true; } }
-    return false;
-  }
-
-  // ===== Tiny Smoke Tests =====
-  function runSelfTests(){
-    try{
-      console.assert(typeof navigator.getGamepads === 'function', 'Gamepad API missing');
-      console.assert(world.w>0 && world.h>0, 'Map not loaded');
-      console.assert(Array.isArray(entities), 'Entities array missing');
-      const doorCount = world.doors.length; console.assert(doorCount>=1, 'Expected at least one door');
-      const tBoom = makeBomb(0,0); console.assert(tBoom.type==='bomb', 'Bomb factory');
-      console.assert(typeof render === 'function' && typeof update === 'function', 'Core loops present');
-      // chooseGamepad tests
-      let r = chooseGamepad([{connected:false},{connected:true},{connected:true}], 2); console.assert(r.idx===2, 'prefers specified index');
-      r = chooseGamepad([{connected:false},{connected:true}], 0); console.assert(r.idx===1, 'skips disconnected #0');
-      r = chooseGamepad([{connected:true}], 5); console.assert(r.idx===0, 'oob fallback to 0');
-      // push systems
-      console.assert(typeof handlePushBlocks==='function', 'handlePushBlocks missing');
-      console.assert(typeof intersectsAnyPushBlock==='function', 'intersectsAnyPushBlock missing');
-      if (world.pushBlocks[0]){
-        const b = world.pushBlocks[0];
-        const hit = intersectsAnyPushBlock(b.x*tileSize, b.y*tileSize, tileSize, tileSize);
-        console.assert(!!hit, 'Push-block intersection should detect its own tile');
-      }
-      // render smoke + non-mutating
-      const px0 = player.x, py0 = player.y; let threw = false; try { render(); } catch(e){ threw = true; console.error(e);} console.assert(!threw, 'render() should not throw');
-      console.assert(player.x===px0 && player.y===py0, 'render must not mutate player position');
-      // update no-move when no input
-      const x0=player.x, y0=player.y; update(0); console.assert(player.x===x0 && player.y===y0, 'update(0) should not move player');
-
-      console.log('[Smoke] OK');
-      showToast('Smoke OK');
-    }catch(err){ console.error('Self-test failed', err); }
-  }
-
+  // ===== Boot after Start (with pad priming) =====
+  function startFlow(){ goFullscreen().then(()=>{ populatePadSelect(); for(let i=0;i<3;i++) requestAnimationFrame(()=>{ if(navigator.getGamepads){ navigator.getGamepads(); populatePadSelect(); } }); document.getElementById('overlay').style.display='none'; showToast('Press Esc to pause.'); startGame(); }); }
+  document.getElementById('startBtn').addEventListener('click', startFlow);
+  document.getElementById('startBtn').addEventListener('pointerdown', ()=>{ if(navigator.getGamepads){ navigator.getGamepads(); } });
 })();
 </script>
 </body>
-</html>

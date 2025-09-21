@@ -23,7 +23,7 @@
   <div id="overlay">
     <div id="panel">
       <h1>Zelda‑like MVP</h1>
-      <p class="muted">Rectangles only. Keyboard + Gamepad. Includes: movement, sword, enemies, hearts, rupees, chest, sign, <b>push</b> blocks, doors (normal/locked/clear), grass, cracked walls, pots, bombs, boomerang, bow, switches.</p>
+      <p class="muted">Rectangles only. Keyboard + Gamepad. Includes: movement, sword, enemies, hearts, rupees, chest, sign, <b>push</b> blocks, doors (normal/locked/clear/switch‑only), grass, cracked walls, pots, bombs, boomerang, bow, switches.</p>
       <ul class="muted">
         <li><b>Move:</b> <code>WASD</code> / <code>Arrows</code> / Left‑stick / D‑pad (<b>Hold Shift / LT/RT for sprint</b>)</li>
         <li><b>Attack/Use:</b> <code>J</code> / <code>Space</code> / Gamepad <code>A (0)</code></li>
@@ -107,7 +107,7 @@
     pressEdge={};
   }
 
-  var world={tiles:[],w:0,h:0,solids:{'#':1,'B':1,'D':1,'L':1,'P':1,'X':1,'Q':1},chests:[],signs:[],pushBlocks:[],enemies:[],rupees:[],doors:[],switches:[]};
+  var world={tiles:[],w:0,h:0,solids:{'#':1,'B':1,'D':1,'L':1,'P':1,'X':1,'Q':1,'T':1},chests:[],signs:[],pushBlocks:[],enemies:[],rupees:[],doors:[],switches:[]};
   var isSolidChar=function(ch){return !!world.solids[ch];};
   var tileAt=function(px,py){var x=(px/tileSize)|0,y=(py/tileSize)|0;if(x<0||y<0||x>=world.w||y>=world.h)return '#';return world.tiles[y][x];};
   var isSolidTile=function(px,py){return isSolidChar(tileAt(px,py));};
@@ -124,8 +124,9 @@
       if(t==='B')world.pushBlocks.push({x:x,y:y});
       if(t==='E')world.enemies.push(makeEnemy(x*tileSize+4,y*tileSize+4));
       if(t==='r')world.rupees.push(makeRupee(x*tileSize+6,y*tileSize+6));
-      if(t==='D')world.doors.push({x:x,y:y,open:false,locked:false});
-      if(t==='L')world.doors.push({x:x,y:y,open:false,locked:true});
+      if(t==='D')world.doors.push({x:x,y:y,open:false,locked:false,onlySwitch:false});
+      if(t==='L')world.doors.push({x:x,y:y,open:false,locked:true,onlySwitch:false});
+      if(t==='T')world.doors.push({x:x,y:y,open:false,locked:false,onlySwitch:true});
       if(t==='^')world.switches.push({x:x,y:y});
     }
   }
@@ -149,14 +150,14 @@
     var W=60,H=22;var rows=[];for(var i=0;i<H;i++){var row=[];for(var j=0;j<W;j++)row.push('#');rows.push(row);} 
     var fill=function(x1,y1,x2,y2,ch){ch=ch||'.';for(var y=y1;y<=y2;y++)for(var x=x1;x<=x2;x++)rows[y][x]=ch;};
     var place=function(x,y,ch){rows[y][x]=ch;};
-    // R1: Start, sign, simple door
-    fill(2,3,10,9,'.'); place(4,5,'S'); place(6,7,'G'); place(8,7,'P'); place(11,6,'D');
+    // R1: Start, sign, simple door, extra pots to test drops
+    fill(2,3,10,9,'.'); place(4,5,'S'); place(6,7,'G'); place(8,7,'P'); place(6,6,'P'); place(7,7,'P'); place(5,7,'P'); place(11,6,'D');
     // R2: Enemy + key -> locked door
     fill(12,3,22,9,'.'); place(14,6,'E'); place(20,5,'K'); place(23,6,'L');
-    // R3: Push block -> switch door
-    fill(24,3,34,9,'.'); place(27,6,'B'); place(30,6,'^'); place(35,6,'D');
-    // R4: Bomb cracked wall -> clear gate
-    fill(36,3,48,9,'.'); place(41,5,'S'); for(var x=42;x<=46;x++) place(x,6,'X'); place(49,6,'Q');
+    // R3: Push block -> switch‑only door (T)
+    fill(24,3,34,9,'.'); place(27,6,'B'); place(30,6,'^'); place(35,6,'T');
+    // R4: Bomb cracked wall (in the wall) -> clear gate
+    fill(37,3,48,9,'.'); place(41,5,'S'); place(36,6,'X'); place(49,6,'Q');
     // R5: Reward
     fill(50,3,58,9,'.'); place(54,6,'C'); place(52,6,'r'); place(56,6,'r');
     var out=[];for(var yy=0;yy<rows.length;yy++){out.push(rows[yy].join(''));}return out;
@@ -167,7 +168,7 @@
 
   var pushTimer=0;
   var intersectsAnyPushBlock=function(x,y,w,h){for(var i=0;i<world.pushBlocks.length;i++){var b=world.pushBlocks[i];var r={x:b.x*tileSize,y:b.y*tileSize,w:tileSize,h:tileSize};if(x<r.x+r.w&&r.x<x+w&&y<r.y+r.h&&r.y<y+h)return true;}return false;};
-  function handlePushBlocks(ix,iy,frame){ if(Math.abs(ix)+Math.abs(iy)===0){pushTimer=0;return;} var px=((player.x+player.w/2)/tileSize)|0, py=((player.y+player.h/2)/tileSize)|0; var dir=Math.abs(ix)>Math.abs(iy)?(ix>0?'right':'left'):(iy>0?'down':'up'); var dx=dir==='right'?1:dir==='left'?-1:0, dy=dir==='down'?1:dir==='up'?-1:0; var tx=px+dx,ty=py+dy; var block=null; for(var i=0;i<world.pushBlocks.length;i++){var bb=world.pushBlocks[i];if(bb.x===tx&&bb.y===ty){block=bb;break;}} if(!block){pushTimer=0;return;} pushTimer+=frame; if(pushTimer<0.25)return; var nx=tx+dx,ny=ty+dy; if(nx<0||ny<0||nx>=world.w||ny>=world.h)return; var tNext=world.tiles[ny][nx]; var occupied=false; for(var j=0;j<world.pushBlocks.length;j++){var ob=world.pushBlocks[j];if(ob!==block&&ob.x===nx&&ob.y===ny){occupied=true;break;}} var solid=isSolidChar(tNext)&&tNext!=='D'&&tNext!=='^'&&tNext!=='L'&&tNext!=='Q'; if(occupied||solid)return; world.tiles[block.y][block.x]='.'; block.x=nx; block.y=ny; world.tiles[ny][nx]='B'; pushTimer=0; view.shake=2; var door=null; for(var k=0;k<world.doors.length;k++){var d=world.doors[k];if(d.x===nx&&d.y===ny&&!d.open){door=d;break;}} if(door){door.open=true;world.tiles[ny][nx]='.';showToast('Door opened!');} var sw=null; for(var m=0;m<world.switches.length;m++){var s=world.switches[m];if(s.x===nx&&s.y===ny){sw=s;break;}} if(sw){for(var n=0;n<world.doors.length;n++){var dd=world.doors[n];if(!dd.open){dd.open=true;world.tiles[dd.y][dd.x]='.';}}showToast('Switch pressed');}
+  function handlePushBlocks(ix,iy,frame){ if(Math.abs(ix)+Math.abs(iy)===0){pushTimer=0;return;} var px=((player.x+player.w/2)/tileSize)|0, py=((player.y+player.h/2)/tileSize)|0; var dir=Math.abs(ix)>Math.abs(iy)?(ix>0?'right':'left'):(iy>0?'down':'up'); var dx=dir==='right'?1:dir==='left'?-1:0, dy=dir==='down'?1:dir==='up'?-1:0; var tx=px+dx,ty=py+dy; var block=null; for(var i=0;i<world.pushBlocks.length;i++){var bb=world.pushBlocks[i];if(bb.x===tx&&bb.y===ty){block=bb;break;}} if(!block){pushTimer=0;return;} pushTimer+=frame; if(pushTimer<0.25)return; var nx=tx+dx,ny=ty+dy; if(nx<0||ny<0||nx>=world.w||ny>=world.h)return; var tNext=world.tiles[ny][nx]; var occupied=false; for(var j=0;j<world.pushBlocks.length;j++){var ob=world.pushBlocks[j];if(ob!==block&&ob.x===nx&&ob.y===ny){occupied=true;break;}} var solid=isSolidChar(tNext)&&tNext!=='D'&&tNext!=='^'&&tNext!=='L'&&tNext!=='Q'&&tNext!=='T'; if(occupied||solid)return; world.tiles[block.y][block.x]='.'; block.x=nx; block.y=ny; world.tiles[ny][nx]='B'; pushTimer=0; view.shake=2; var door=null; for(var k=0;k<world.doors.length;k++){var d=world.doors[k];if(d.x===nx&&d.y===ny&&!d.open){door=d;break;}} if(door){door.open=true;world.tiles[ny][nx]='.';showToast('Door opened!');} var sw=null; for(var m=0;m<world.switches.length;m++){var s=world.switches[m];if(s.x===nx&&s.y===ny){sw=s;break;}} if(sw){for(var n=0;n<world.doors.length;n++){var dd=world.doors[n];if(dd.onlySwitch&&!dd.open){dd.open=true;world.tiles[dd.y][dd.x]='.';}}showToast('Switch pressed');}
   }
 
   var gTime=0,running=false,last=now();
@@ -234,7 +235,7 @@
     for(var si=0;si<world.switches.length;si++){
       var s=world.switches[si]; var pcx2=((player.x+player.w/2)/tileSize)|0,pcy2=((player.y+player.h/2)/tileSize)|0; var pressed=false;
       if(pcx2===s.x&&pcy2===s.y)pressed=true; if(!pressed)for(var bi=0;bi<world.pushBlocks.length;bi++){var b=world.pushBlocks[bi];if(b.x===s.x&&b.y===s.y){pressed=true;break;}}
-      if(pressed)for(var di=0;di<world.doors.length;di++){var d=world.doors[di];if(!d.open){d.open=true;world.tiles[d.y][d.x]='.';showToast('Door opened.');}}
+      if(pressed)for(var di=0;di<world.doors.length;di++){var d=world.doors[di];if(d.onlySwitch&&!d.open){d.open=true;world.tiles[d.y][d.x]='.';showToast('Door opened.');}}
     }
 
     openClearGatesIfNoEnemies();
@@ -248,8 +249,8 @@
     if(changed) showToast('Path opened!'); return changed;
   }
 
-  var nameMap={'C':'Chest','S':'Sign','D':'Door','L':'Locked','B':'Block','P':'Pot','G':'Grass','^':'Switch','X':'Cracked','K':'Key','Q':'ClearDoor'};
-  var isInteractiveChar=function(t){return t==='C'||t==='S'||t==='D'||t==='L'||t==='B'||t==='P'||t==='G'||t==='^'||t==='X'||t==='K'||t==='Q';};
+  var nameMap={'C':'Chest','S':'Sign','D':'Door','L':'Locked','B':'Block','P':'Pot','G':'Grass','^':'Switch','X':'Cracked','K':'Key','Q':'ClearDoor','T':'SwitchDoor'};
+  var isInteractiveChar=function(t){return t==='C'||t==='S'||t==='D'||t==='L'||t==='B'||t==='P'||t==='G'||t==='^'||t==='X'||t==='K'||t==='Q'||t==='T';};
   var isNearTile=function(tx,ty,r){r=r||NEAR_R;return hypot((player.x+player.w/2)-(tx*tileSize+8),(player.y+player.h/2)-(ty*tileSize+8))<r;};
 
   var label4=function(txt,x,y){ctx.save();ctx.font='4px monospace';ctx.fillStyle='black';ctx.fillText(txt,x+1,y+1);ctx.fillStyle='#a5adbb';ctx.fillText(txt,x,y);ctx.restore();};
@@ -268,7 +269,7 @@
         else if(t==='B'){ctx.fillStyle='#3a3a52';ctx.fillRect(px+1,py+1,tileSize-2,tileSize-2);} 
         else if(t==='X'){ctx.fillStyle='#533b3b';ctx.fillRect(px+1,py+1,tileSize-2,tileSize-2);} 
         else if(t==='^'){ctx.fillStyle='#355b7a';ctx.fillRect(px+3,py+6,tileSize-6,4);} 
-        else if(t==='D'||t==='L'){ctx.fillStyle=(t==='L')?'#8a2a2a':'#6a2a2a';ctx.fillRect(px+1,py+1,tileSize-2,tileSize-2);} 
+        else if(t==='D'||t==='L'||t==='T'){ctx.fillStyle=(t==='L')?'#8a2a2a':'#6a2a2a';ctx.fillRect(px+1,py+1,tileSize-2,tileSize-2);} 
         else if(t==='Q'){ctx.fillStyle='#244a8a';ctx.fillRect(px+1,py+1,tileSize-2,tileSize-2);} 
         else if(t==='K'){ctx.fillStyle='#c7a84a';ctx.fillRect(px+4,py+6,8,6);} 
 
@@ -281,18 +282,18 @@
 
     for(var ei2=0;ei2<entities.length;ei2++){
       var e2=entities[ei2];
-      if(e2.type==='enemy'){ctx.fillStyle=e2.stunT>0?'#b6c5ff':(e2.hurtT>0?'#ffaaaa':'#8ad0ff');ctx.fillRect(e2.x,e2.y,e2.w,e2.h);label4('ENEMY',e2.x,e2.y-2);} 
-      else if(e2.type==='rupee'){var bob=Math.sin(e2.bob)*1.5;ctx.fillStyle='#67e08d';ctx.fillRect(e2.x,e2.y+bob,e2.w,e2.h);label4('RUPEE',e2.x,e2.y-2);} 
-      else if(e2.type==='heart'){var bob2=Math.sin(e2.bob)*1.2;ctx.fillStyle='#ff6b7a';ctx.fillRect(e2.x,e2.y+bob2,e2.w,e2.h);label4('HEART',e2.x,e2.y-2);} 
-      else if(e2.type==='sword'){ctx.fillStyle='#f0e28a';ctx.fillRect(e2.x,e2.y,e2.w,e2.h);label4('SWORD',e2.x,e2.y-2);} 
-      else if(e2.type==='bomb'){ctx.fillStyle='#444';ctx.fillRect(e2.x,e2.y,e2.w,e2.h);label4('BOMB',e2.x,e2.y-2);} 
-      else if(e2.type==='explosion'){ctx.fillStyle='rgba(255,210,120,0.8)';ctx.fillRect(e2.x,e2.y,e2.w,e2.h);label4('EXP',e2.x,e2.y-2);} 
-      else if(e2.type==='boomerang'){ctx.fillStyle='#bde0ff';ctx.fillRect(e2.x,e2.y,e2.w,e2.h);label4('BOOM',e2.x,e2.y-2);} 
-      else if(e2.type==='arrow'){ctx.fillStyle='#e9edf5';ctx.fillRect(e2.x,e2.y,e2.w,e2.h);label4('ARROW',e2.x,e2.y-2);} 
-      else if(e2.type==='potProj'){ctx.fillStyle='#6f6a5f';ctx.fillRect(e2.x,e2.y,e2.w,e2.h);label4('POT',e2.x,e2.y-2);} 
+      if(e2.type==='enemy'){ctx.fillStyle=e2.stunT>0?'#b6c5ff':(e2.hurtT>0?'#ffaaaa':'#8ad0ff');ctx.fillRect(e2.x|0,e2.y|0,e2.w,e2.h);label4('ENEMY',e2.x|0,e2.y-2|0);} 
+      else if(e2.type==='rupee'){var bob=Math.sin(e2.bob)*1.5;ctx.fillStyle='#67e08d';ctx.fillRect(e2.x|0,(e2.y+bob)|0,e2.w,e2.h);label4('RUPEE',e2.x|0,e2.y-2|0);} 
+      else if(e2.type==='heart'){var bob2=Math.sin(e2.bob)*1.2;ctx.fillStyle='#ff6b7a';ctx.fillRect(e2.x|0,(e2.y+bob2)|0,e2.w,e2.h);label4('HEART',e2.x|0,e2.y-2|0);} 
+      else if(e2.type==='sword'){ctx.fillStyle='#f0e28a';ctx.fillRect(e2.x|0,e2.y|0,e2.w,e2.h);label4('SWORD',e2.x|0,e2.y-2|0);} 
+      else if(e2.type==='bomb'){ctx.fillStyle='#444';ctx.fillRect(e2.x|0,e2.y|0,e2.w,e2.h);label4('BOMB',e2.x|0,e2.y-2|0);} 
+      else if(e2.type==='explosion'){ctx.fillStyle='rgba(255,210,120,0.8)';ctx.fillRect(e2.x|0,e2.y|0,e2.w,e2.h);label4('EXP',e2.x|0,e2.y-2|0);} 
+      else if(e2.type==='boomerang'){ctx.fillStyle='#bde0ff';ctx.fillRect(e2.x|0,e2.y|0,e2.w,e2.h);label4('BOOM',e2.x|0,e2.y-2|0);} 
+      else if(e2.type==='arrow'){ctx.fillStyle='#e9edf5';ctx.fillRect(e2.x|0,e2.y|0,e2.w,e2.h);label4('ARROW',e2.x|0,e2.y-2|0);} 
+      else if(e2.type==='potProj'){ctx.fillStyle='#6f6a5f';ctx.fillRect(e2.x|0,e2.y|0,e2.w,e2.h);label4('POT',e2.x|0,e2.y-2|0);} 
     }
 
-    if(!player.paused){ctx.fillStyle=player.iframes>0?'#ffd3d3':'#f1f3f7';ctx.fillRect(player.x,player.y,player.w,player.h);if(player.carry==='pot'){ctx.fillStyle='#6f6a5f';ctx.fillRect(player.x,player.y-6,10,6);}ctx.fillStyle='#7cc9ff';var fx=player.dir==='right'?player.x+player.w:player.dir==='left'?player.x-2:player.x+player.w/2-1,fy=player.dir==='down'?player.y+player.h:player.dir==='up'?player.y-2:player.y+player.h/2-1;ctx.fillRect(fx,fy,2,2);} 
+    if(!player.paused){var pxDraw=player.x|0,pyDraw=player.y|0;ctx.fillStyle=player.iframes>0?'#ffd3d3':'#f1f3f7';ctx.fillRect(pxDraw,pyDraw,player.w,player.h);if(player.carry==='pot'){ctx.fillStyle='#6f6a5f';ctx.fillRect(pxDraw,pyDraw-6,10,6);}ctx.fillStyle='#7cc9ff';var fx=player.dir==='right'?pxDraw+player.w:player.dir==='left'?pxDraw-2:pxDraw+player.w/2-1,fy=player.dir==='down'?pyDraw+player.h:player.dir==='up'?pyDraw-2:pyDraw+player.h/2-1;ctx.fillRect(fx,fy,2,2);} 
 
     ctx.restore();
     var hearts=Math.ceil(player.maxHp/2);for(var hi=0;hi<hearts;hi++){var full=player.hp/2>hi;var half=player.hp/2>hi&&player.hp%2===1&&Math.floor(player.hp/2)===hi;var hx=10+hi*12,hy=10;ctx.fillStyle='#222';ctx.fillRect(hx,hy,10,8);ctx.fillStyle=full?'#ff5f6d':half?'#ffb3b9':'#444';ctx.fillRect(hx+1,hy+1,8,6);} 
@@ -311,7 +312,7 @@
     var near=function(tx,ty,r){r=r||NEAR_R;return isNearTile(tx,ty,r);};
     for(var i=0;i<world.signs.length;i++){var s=world.signs[i];if(near(s.x,s.y))return 'Read (E / X)';}
     for(var j=0;j<world.chests.length;j++){var c=world.chests[j];if(!c.open&&near(c.x,c.y))return 'Open (E / X)';}
-    for(var k=0;k<world.doors.length;k++){var d=world.doors[k];if(!d.open&&near(d.x,d.y))return d.locked?(player.keys>0?'Unlock (E)':'Locked'):'Open (E)';}
+    for(var k=0;k<world.doors.length;k++){var d=world.doors[k];if(!d.open&&near(d.x,d.y))return d.locked?(player.keys>0?'Unlock (E)':'Locked'):(d.onlySwitch?'': 'Open (E)');}
     var px=((player.x+player.w/2)/tileSize)|0,py=((player.y+player.h/2)/tileSize)|0; 
     for(var b=0;b<world.pushBlocks.length;b++){var bl=world.pushBlocks[b];if(Math.abs(bl.x-px)+Math.abs(bl.y-py)===1)return 'Push (hold toward)';}
     if(world.tiles[py]&&world.tiles[py][px]==='K')return 'Take key';
@@ -321,9 +322,10 @@
   function wrapText(c,t,x,y,maxW,lh){var wds=(''+t).split(/\s+/);var line='';for(var n=0;n<wds.length;n++){var test=line+wds[n]+' ';var w=c.measureText(test).width;if(w>maxW&&n>0){c.fillText(line,x,y);line=wds[n]+' ';y+=lh;}else line=test;}c.fillText(line,x,y);} 
   function trySign(){for(var i=0;i<world.signs.length;i++){var s=world.signs[i];var r={x:s.x*tileSize,y:s.y*tileSize,w:tileSize,h:tileSize};var near=hypot((player.x+player.w/2)-(r.x+r.w/2),(player.y+player.h/2)-(r.y+r.h/2))<22;if(near){player.reading=s.text;s.seen=true;return true;}}return false;} 
   function tryChest(){for(var i=0;i<world.chests.length;i++){var c=world.chests[i];var r={x:c.x*tileSize,y:c.y*tileSize,w:tileSize,h:tileSize};var near=hypot((player.x+player.w/2)-(r.x+r.w/2),(player.y+player.h/2)-(r.y+r.h/2))<22;if(near&&!c.open){c.open=true;for(var j=0;j<3;j++)entities.push(makeRupee(r.x+4+j*3,r.y+4));showToast('Chest opened!');return true;}}return false;} 
-  function tryDoor(){for(var i=0;i<world.doors.length;i++){var d=world.doors[i];var r={x:d.x*tileSize,y:d.y*tileSize,w:tileSize,h:tileSize};var near=hypot((player.x+player.w/2)-(r.x+r.w/2),(player.y+player.h/2)-(r.y+r.h/2))<22;if(near&&!d.open){if(d.locked){if(player.keys>0){player.keys--;d.open=true;world.tiles[d.y][d.x]='.';showToast('Unlocked door.');return true;}else{showToast("It's locked");return true;}}else{d.open=true;world.tiles[d.y][d.x]='.';showToast('Door opened.');return true;}}}return false;} 
+  function tryDoor(){for(var i=0;i<world.doors.length;i++){var d=world.doors[i];var r={x:d.x*tileSize,y:d.y*tileSize,w:tileSize,h:tileSize};var near=hypot((player.x+player.w/2)-(r.x+r.w/2),(player.y+player.h/2)-(r.y+r.h/2))<22;if(near&&!d.open){if(d.onlySwitch){return true;} if(d.locked){if(player.keys>0){player.keys--;d.open=true;world.tiles[d.y][d.x]='.';showToast('Unlocked door.');return true;}else{showToast("It's locked");return true;}}else{d.open=true;world.tiles[d.y][d.x]='.';showToast('Door opened.');return true;}}}return false;} 
   function tryPot(){if(player.carry)return false;var px=((player.x+player.w/2)/tileSize)|0,py=((player.y+player.h/2)/tileSize)|0;for(var i=0;i<DIRS.length;i++){var dx=DIRS[i][0],dy=DIRS[i][1];var tx=px+dx,ty=py+dy;if(world.tiles[ty]&&world.tiles[ty][tx]==='P'){world.tiles[ty][tx]='.';player.carry='pot';showToast('Picked up pot');return true;}}return false;}
 
+  function cloneTiles(){var out=[];for(var y=0;y<world.h;y++){out[y]=world.tiles[y].slice(0);}return out;}
   function runSelfTests(){try{
       console.assert(typeof navigator.getGamepads==='function','Gamepad API missing');
       console.assert(world.w>0&&world.h>0,'Map not loaded');
@@ -331,12 +333,16 @@
       console.assert(typeof render==='function'&&typeof update==='function','Loops present');
       var r=chooseGamepad([{connected:false},{connected:true},{connected:true}],2);console.assert(r.idx===2,'prefer specified');r=chooseGamepad([{connected:false},{connected:true}],0);console.assert(r.idx===1,'skip disconnected 0');r=chooseGamepad([{connected:true}],5);console.assert(r.idx===0,'oob → 0');
       r=chooseGamepad([{connected:false,id:'ghost',buttons:[],axes:[]} , {connected:false,id:'real',buttons:[{pressed:false}],axes:[0]}], -1);console.assert(r.idx===1,'fallback non-null');
-      console.assert(isSolidChar('Q'),'Q is solid');
+      console.assert(isSolidChar('Q')&&isSolidChar('T'),'Q/T solid');
       var ox=player.x,oy=player.y;keys.right=true;input.sprint=false;update(0.016);var d1=player.x-ox;player.x=ox;player.y=oy;keys.right=true;input.sprint=true;update(0.016);var d2=player.x-ox;keys.right=false;input.sprint=false;console.assert(d2>d1,'sprint faster');
-      // Q open test
-      var anyQ=false;for(var yy=0;yy<world.h;yy++)for(var xx=0;xx<world.w;xx++)if(world.tiles[yy][xx]==='Q')anyQ=true; if(!anyQ){world.tiles[5][49]='Q';}
-      for(var i=entities.length-1;i>=0;i--)if(entities[i].type==='enemy')entities.splice(i,1); 
+      // Q open test without mutating real game state
+      var savedTiles=cloneTiles(); var savedEntities=entities.slice(0);
+      var hadQ=false, qx=49, qy=5; if(qx>=world.w)qx=world.w-1; if(qy>=world.h)qy=world.h-1;
+      for(var yy=0;yy<world.h;yy++){for(var xx=0;xx<world.w;xx++){if(world.tiles[yy][xx]==='Q'){hadQ=true;break;}} if(hadQ)break;}
+      if(!hadQ){world.tiles[qy][qx]='Q';}
+      entities = savedEntities.filter(function(e){return e.type!=='enemy';});
       var opened=openClearGatesIfNoEnemies(); console.assert(opened,'Q opened when no enemies');
+      entities = savedEntities; world.tiles = savedTiles;
       console.log('[Smoke] OK');showToast('Smoke OK');
     }catch(err){console.error('Self-test failed',err);} }
 
